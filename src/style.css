@@ -156,6 +156,25 @@ canvas {
   opacity: 0.96;
 }
 
+.lap-timer.is-record {
+  border-color: rgba(255, 215, 110, 0.9);
+  background:
+    radial-gradient(circle at top left, rgba(255, 209, 102, 0.22), transparent 52%),
+    linear-gradient(180deg, rgba(55, 34, 8, 0.78), rgba(15, 23, 42, 0.52));
+  box-shadow:
+    0 1rem 2.5rem rgba(15, 23, 42, 0.22),
+    0 0 1.4rem rgba(255, 196, 74, 0.2);
+}
+
+.lap-timer.is-record::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px rgba(255, 240, 184, 0.34);
+  pointer-events: none;
+}
+
 .lap-timer-header {
   display: flex;
   align-items: center;
@@ -170,6 +189,10 @@ canvas {
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: rgba(191, 219, 254, 0.88);
+}
+
+.lap-timer.is-record .lap-timer-status {
+  color: rgba(255, 230, 163, 0.98);
 }
 
 .minimap {
@@ -385,6 +408,51 @@ canvas {
   color: rgba(255, 228, 230, 0.92);
 }
 
+.finish-celebration--superboost::before {
+  background:
+    radial-gradient(circle at center, rgba(224, 242, 254, 0.24), transparent 22%),
+    radial-gradient(circle at center, rgba(56, 189, 248, 0.22), transparent 46%),
+    radial-gradient(circle at center, rgba(59, 130, 246, 0.18), transparent 68%),
+    radial-gradient(circle at center, rgba(15, 23, 42, 0.16), transparent 76%);
+}
+
+.finish-celebration--superboost {
+  place-items: start center;
+  padding-top: clamp(1.75rem, 8vh, 4.75rem);
+}
+
+.finish-celebration--superboost .finish-flare {
+  width: min(36vw, 18rem);
+  background:
+    radial-gradient(circle, rgba(239, 246, 255, 0.96) 0%, rgba(125, 211, 252, 0.42) 22%, rgba(59, 130, 246, 0.22) 42%, transparent 72%);
+}
+
+.finish-celebration--superboost .finish-burst-ring {
+  width: min(44vw, 24rem);
+  border-color: rgba(191, 219, 254, 0.54);
+  box-shadow:
+    0 0 0 0.35rem rgba(56, 189, 248, 0.1),
+    0 0 2.9rem rgba(96, 165, 250, 0.24);
+}
+
+.finish-celebration--superboost .finish-notice {
+  font-size: clamp(2.35rem, 6vw, 4.75rem);
+  color: #eff6ff;
+  text-shadow:
+    0 0 0.3rem rgba(255, 255, 255, 0.98),
+    0 0 1.2rem rgba(125, 211, 252, 0.8),
+    0 0 2.9rem rgba(59, 130, 246, 0.42),
+    0 0.35rem 1.6rem rgba(15, 23, 42, 0.45);
+  -webkit-text-stroke: 2px rgba(8, 47, 73, 0.44);
+}
+
+.finish-celebration--superboost .finish-subtitle {
+  margin-top: clamp(1.9rem, 7vw, 3rem);
+  padding-top: 2.2rem;
+  font-size: clamp(0.7rem, 1.25vw, 0.95rem);
+  color: rgba(224, 242, 254, 0.94);
+}
+
 .minimap-label {
   font-family: Arial, sans-serif;
   font-size: 0.68rem;
@@ -392,6 +460,22 @@ canvas {
   letter-spacing: 0.16em;
   text-transform: uppercase;
   color: rgba(226, 232, 240, 0.84);
+}
+
+.minimap-hint {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.55rem;
+  font-family: Arial, sans-serif;
+  font-size: 0.63rem;
+  line-height: 1.35;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(191, 219, 254, 0.76);
+}
+
+.minimap-hint span {
+  white-space: nowrap;
 }
 
 .minimap-canvas {
@@ -454,6 +538,13 @@ canvas {
   line-height: 1;
   letter-spacing: 0.04em;
   color: #f8fafc;
+}
+
+.lap-timer.is-record .lap-timer-value {
+  color: #fff3cf;
+  text-shadow:
+    0 0 0.45rem rgba(255, 243, 207, 0.3),
+    0 0 1rem rgba(255, 196, 74, 0.24);
 }
 
 .eyebrow {
