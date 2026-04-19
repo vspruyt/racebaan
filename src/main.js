@@ -7,13 +7,13 @@ const app = document.querySelector('#app')
 app.innerHTML = `
   <section class="screen screen-home" data-screen="home">
     <div class="panel hero-panel">
-      <p class="eyebrow">Three.js + Vite</p>
-      <h1>Race with your Friends</h1>
+      <p class="eyebrow">Made By Stig & his dad</p>
+      <h1>Race with your friends</h1>
       <p class="hint">
-        Jump into the prototype and head to the game screen where we can start
-        building the race track.
+        Drop into a fast arcade racing experience built for players who want
+        clean laps, clutch boosts, and bragging rights against their friends.
       </p>
-      <button class="start-button" type="button">Start Game</button>
+      <button class="start-button" type="button">Start Race</button>
     </div>
   </section>
 
@@ -29,19 +29,26 @@ app.innerHTML = `
       </div>
       <div class="lap-timers" aria-live="polite" aria-relevant="additions text"></div>
     </div>
-    <div class="minimap" aria-hidden="true">
-      <span class="minimap-label">Track Map</span>
-      <span class="minimap-hint">
-        <span>F camera</span>
-        <span>M mesh</span>
-        <span>B boost</span>
-      </span>
-      <canvas class="minimap-canvas"></canvas>
+    <div class="touch-controls">
+      <button class="touch-boost hidden" type="button" aria-label="Boost">Boost</button>
+      <button class="touch-superboost hidden" type="button" aria-label="Super Boost">
+        Super Boost
+      </button>
+      <div class="minimap" aria-hidden="true">
+        <span class="minimap-label">Track Map</span>
+        <span class="minimap-hint">
+          <span>F camera</span>
+          <span>R Reset</span>
+          <span>B boost</span>
+        </span>
+        <canvas class="minimap-canvas"></canvas>
+      </div>
     </div>
     <div class="finish-celebration">
       <div class="finish-particles"></div>
       <div class="finish-flare"></div>
       <div class="finish-burst-ring"></div>
+      <div class="finish-kicker" aria-live="polite" aria-atomic="true"></div>
       <div class="finish-notice" aria-live="polite" aria-atomic="true">FINISHED</div>
       <div class="finish-subtitle">Lap Complete</div>
     </div>
@@ -49,7 +56,7 @@ app.innerHTML = `
       <div class="finish-flare"></div>
       <div class="finish-burst-ring"></div>
       <div class="finish-notice" aria-live="assertive" aria-atomic="true">GAME OVER</div>
-      <div class="finish-subtitle game-over-subtitle">Press Enter or Space to respawn</div>
+      <div class="finish-subtitle game-over-subtitle">Press R, Enter, or Space to respawn</div>
     </div>
   </section>
 `
@@ -62,8 +69,12 @@ const speedometerValue = app.querySelector('.speedometer-value')
 const lapTimers = app.querySelector('.lap-timers')
 const minimapCanvas = app.querySelector('.minimap-canvas')
 const minimapContext = minimapCanvas.getContext('2d')
+const minimapHint = app.querySelector('.minimap-hint')
+const touchBoostButton = app.querySelector('.touch-boost')
+const touchSuperBoostButton = app.querySelector('.touch-superboost')
 const finishCelebration = app.querySelector('.finish-celebration')
 const finishParticleLayer = app.querySelector('.finish-particles')
+const finishKicker = finishCelebration.querySelector('.finish-kicker')
 const finishNotice = finishCelebration.querySelector('.finish-notice')
 const finishSubtitle = finishCelebration.querySelector('.finish-subtitle')
 const gameOverCelebration = app.querySelector('.finish-celebration--danger')
@@ -89,6 +100,8 @@ const AudioContextClass =
 
 const DAY_SKY_COLOR = 0xbfe7ff
 const DAY_FOG_COLOR = 0xd9f1ff
+const LAP_RECORD_STORAGE_KEY = 'racebaan-best-lap-time'
+const LAP_RECORD_MATCH_EPSILON = 0.0005
 const TRACK_BASE_Y = -0.78
 const TRACK_THICKNESS = 0.045
 const GROUND_LEVEL = TRACK_BASE_Y
@@ -108,6 +121,15 @@ const TRACK_SKID_LAYER_OFFSET = 0.005
 const TRACK_SKID_TEXTURE_REPEAT = 6
 const TRACK_SAMPLE_COUNT = 900
 const TRACK_SHADOW_OFFSET = 0.01
+const TRACK_STRAIGHT_TURN_THRESHOLD = 0.18
+const TRACK_JUMP_GAP_LENGTH = 3.8
+const TRACK_JUMP_TAKEOFF_LENGTH = 4.8
+const TRACK_JUMP_LANDING_LENGTH = 4.1
+const TRACK_JUMP_TAKEOFF_LIFT = 0.92
+const TRACK_JUMP_LANDING_LIFT = 0.46
+const TRACK_JUMP_LIP_FLAT_LENGTH = 0.85
+const TRACK_JUMP_LANDING_FLAT_LENGTH = 0.95
+const TRACK_JUMP_GAME_OVER_GRACE = 0.72
 const SLOPE_SPEED_FACTOR = 24
 const TREE_CLEARANCE = TRACK_HALF_WIDTH + 6.8
 const TRACK_CENTERING_START_RATIO = 0.52
@@ -189,6 +211,11 @@ const MINIMAP_PADDING = 16
 const MINIMAP_LOOKAHEAD_SAMPLES_MIN = 56
 const MINIMAP_LOOKAHEAD_SAMPLES_MAX = 140
 const TRACK_FRAME_SEARCH_RADIUS = 42
+const TOUCH_DRIVE_RADIUS = 110
+const TOUCH_DRIVE_DEADZONE = 14
+const TOUCH_DRIVE_HOLD_THROTTLE = 0.58
+const TOUCH_DRIVE_BRAKE_INTENT_THRESHOLD = 0.3
+const TOUCH_DRIVE_REVERSE_SPEED_THRESHOLD = 0.24
 const CRASH_GAME_OVER_DELAY = 0.65
 const CRASH_OUT_OF_TRACK_MARGIN = 1.4
 const CRASH_BELOW_TRACK_MARGIN = 0.48
@@ -273,6 +300,7 @@ const PHYSICS_GUARDRAIL_COLLISION_MESH_THICKNESS =
   GUARDRAIL_COLLISION_THICKNESS + PHYSICS_GUARDRAIL_WHEEL_CLEARANCE
 const clock = new THREE.Clock()
 const TRACK_DATA = createTrackData()
+const TRACK_JUMP = TRACK_DATA.jumpFeature
 const TRACK_MINIMAP_BOUNDS = getTrackBounds2D()
 const TRACK_START_INDEX = 18
 const CAR_START_SAMPLE = TRACK_DATA.samples[TRACK_START_INDEX]
@@ -315,6 +343,26 @@ const cameraState = {
   followDistance: FOLLOW_CAMERA_DISTANCE_DEFAULT,
   speedVisual: 0,
 }
+const prefersTouchControls =
+  typeof window !== 'undefined' &&
+  !window.matchMedia?.('(any-pointer: fine)')?.matches &&
+  (window.matchMedia?.('(any-pointer: coarse)')?.matches ||
+    navigator.maxTouchPoints > 0)
+const touchDriveState = {
+  active: false,
+  pointerId: null,
+  startX: 0,
+  startY: 0,
+  pointerX: 0,
+  pointerY: 0,
+  steer: 0,
+  throttle: 0,
+  brake: 0,
+  reverse: 0,
+}
+const touchActionState = {
+  boostMode: 'none',
+}
 const renderState = {
   position: CAR_START_POSITION.clone(),
   rotation: CAR_START_ROTATION,
@@ -341,6 +389,7 @@ const raceState = {
   finishTimer: 0,
   laps: [],
   nextLapNumber: 1,
+  bestLapTime: loadStoredBestLapTime(),
   mode: 'racing',
   superboostActive: false,
   lastSuperboostEntryTime: -Infinity,
@@ -423,10 +472,6 @@ const audioState = {
   lastGuardrailImpactTime: -Infinity,
   guardrailContactActive: false,
 }
-const debugViewState = {
-  meshMode: false,
-  meshMaterials: new Set(),
-}
 const boostState = {
   active: false,
   visualIntensity: 0,
@@ -439,15 +484,6 @@ const boostState = {
   velocities: Array.from({ length: BOOST_PARTICLE_COUNT }, () => new THREE.Vector3()),
   baseColors: Array.from({ length: BOOST_PARTICLE_COUNT }, () => new THREE.Color()),
 }
-if (typeof window !== 'undefined') {
-  window.__racebaanDebug = {
-    carState,
-    physicsState,
-    raceState,
-    debugViewState,
-    boostState,
-  }
-}
 const finishParticleNodes = createFinishParticleNodes()
 
 function randomBetween(min, max) {
@@ -459,11 +495,20 @@ function getCurrentTimeSeconds() {
 }
 
 function isBoostActive() {
-  return raceState.mode === 'racing' && keyState.KeyB
+  return (
+    raceState.mode === 'racing' &&
+    (keyState.KeyB ||
+      touchActionState.boostMode === 'boost' ||
+      touchActionState.boostMode === 'superboost')
+  )
 }
 
 function isSuperboostActive() {
-  return raceState.mode === 'racing' && keyState.KeyB && keyState.ArrowUp
+  return (
+    raceState.mode === 'racing' &&
+    (touchActionState.boostMode === 'superboost' ||
+      (keyState.KeyB && keyState.ArrowUp))
+  )
 }
 
 function getCurrentForwardTopSpeed() {
@@ -475,10 +520,12 @@ function getCurrentForwardTopSpeed() {
 }
 
 function setFinishCelebrationContent(
+  kicker = '',
   title = 'FINISHED',
   subtitle = 'Lap Complete',
   variant = 'finish',
 ) {
+  finishKicker.textContent = kicker
   finishNotice.textContent = title
   finishSubtitle.textContent = subtitle
   finishCelebration.classList.toggle(
@@ -534,13 +581,14 @@ function seedFinishParticles(variant = 'finish') {
 }
 
 function showCelebration({
+  kicker = '',
   title,
   subtitle,
   duration,
   variant = 'finish',
 } = {}) {
   raceState.finishTimer = duration
-  setFinishCelebrationContent(title, subtitle, variant)
+  setFinishCelebrationContent(kicker, title, subtitle, variant)
   seedFinishParticles(variant)
   finishCelebration.classList.remove('is-visible', 'is-bursting')
   void finishCelebration.offsetWidth
@@ -548,8 +596,9 @@ function showCelebration({
 }
 
 function triggerFinishCelebration() {
-  completeCurrentLap()
+  const { isNewRecord } = completeCurrentLap()
   showCelebration({
+    kicker: isNewRecord ? 'New Record' : '',
     title: 'FINISHED',
     subtitle: 'Lap Complete',
     duration: FINISH_NOTICE_DURATION,
@@ -818,6 +867,37 @@ function formatLapTime(totalSeconds) {
   ).padStart(3, '0')}`
 }
 
+function loadStoredBestLapTime() {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return null
+  }
+
+  try {
+    const storedValue = window.localStorage.getItem(LAP_RECORD_STORAGE_KEY)
+
+    if (!storedValue) {
+      return null
+    }
+
+    const parsedValue = Number.parseFloat(storedValue)
+    return Number.isFinite(parsedValue) && parsedValue > 0 ? parsedValue : null
+  } catch {
+    return null
+  }
+}
+
+function storeBestLapTime(bestLapTime) {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(LAP_RECORD_STORAGE_KEY, String(bestLapTime))
+  } catch {
+    // Ignore storage failures so gameplay keeps working in private mode or strict browsers.
+  }
+}
+
 function createLapTimerEntry(lapNumber) {
   const card = document.createElement('div')
   card.className = 'lap-timer is-active'
@@ -854,6 +934,75 @@ function createLapTimerEntry(lapNumber) {
   }
 }
 
+function createStoredRecordLapTimerEntry() {
+  const card = document.createElement('div')
+  card.className = 'lap-timer is-complete is-record'
+  card.setAttribute('aria-atomic', 'true')
+
+  const header = document.createElement('div')
+  header.className = 'lap-timer-header'
+
+  const label = document.createElement('span')
+  label.className = 'speedometer-label'
+  label.textContent = 'Record'
+
+  const status = document.createElement('span')
+  status.className = 'lap-timer-status'
+  status.textContent = 'Saved'
+
+  const readout = document.createElement('div')
+  readout.className = 'lap-timer-readout'
+
+  const value = document.createElement('span')
+  value.className = 'lap-timer-value'
+
+  header.append(label, status)
+  readout.append(value)
+  card.append(header, readout)
+
+  return {
+    node: card,
+    valueNode: value,
+  }
+}
+
+const storedRecordLapTimerEntry = createStoredRecordLapTimerEntry()
+
+function syncStoredRecordLapTimerEntry() {
+  if (Number.isFinite(raceState.bestLapTime)) {
+    storedRecordLapTimerEntry.valueNode.textContent = formatLapTime(raceState.bestLapTime)
+    return
+  }
+
+  storedRecordLapTimerEntry.valueNode.textContent = ''
+}
+
+function setBestLapTime(bestLapTime) {
+  if (!Number.isFinite(bestLapTime) || bestLapTime <= 0) {
+    return false
+  }
+
+  if (
+    Number.isFinite(raceState.bestLapTime) &&
+    bestLapTime >= raceState.bestLapTime - LAP_RECORD_MATCH_EPSILON
+  ) {
+    return false
+  }
+
+  raceState.bestLapTime = bestLapTime
+  storeBestLapTime(bestLapTime)
+  syncStoredRecordLapTimerEntry()
+  return true
+}
+
+function isLapEntryMirroredByStoredRecord(entry) {
+  return (
+    entry.completed &&
+    Number.isFinite(raceState.bestLapTime) &&
+    Math.abs(entry.elapsed - raceState.bestLapTime) <= LAP_RECORD_MATCH_EPSILON
+  )
+}
+
 function syncLapTimerEntry(entry) {
   entry.statusNode.textContent = entry.isRecord
     ? 'Record'
@@ -866,31 +1015,46 @@ function syncLapTimerEntry(entry) {
   entry.node.classList.toggle('is-record', entry.isRecord)
 }
 
-function refreshLapTimerRecordState() {
-  let fastestCompletedEntry = null
+function renderLapTimerList() {
+  const nodes = []
+
+  if (Number.isFinite(raceState.bestLapTime)) {
+    syncStoredRecordLapTimerEntry()
+    nodes.push(storedRecordLapTimerEntry.node)
+  }
 
   for (const entry of raceState.laps) {
-    if (!entry.completed) continue
-
-    if (!fastestCompletedEntry || entry.elapsed < fastestCompletedEntry.elapsed) {
-      fastestCompletedEntry = entry
+    if (!entry.isRecord) {
+      nodes.push(entry.node)
     }
   }
 
+  lapTimers.replaceChildren(...nodes)
+}
+
+function refreshLapTimerRecordState() {
   for (const entry of raceState.laps) {
-    entry.isRecord = entry === fastestCompletedEntry
+    entry.isRecord = isLapEntryMirroredByStoredRecord(entry)
     syncLapTimerEntry(entry)
   }
+
+  renderLapTimerList()
 }
 
 function trimLapTimerEntries() {
-  while (raceState.laps.length > MAX_VISIBLE_LAP_TIMERS) {
+  const getVisibleLapTimerCount = () =>
+    raceState.laps.reduce(
+      (count, entry) => count + (isLapEntryMirroredByStoredRecord(entry) ? 0 : 1),
+      0,
+    )
+
+  while (getVisibleLapTimerCount() > MAX_VISIBLE_LAP_TIMERS) {
     let slowestLapIndex = -1
 
     for (let index = 0; index < raceState.laps.length; index += 1) {
       const entry = raceState.laps[index]
 
-      if (!entry.completed) continue
+      if (!entry.completed || isLapEntryMirroredByStoredRecord(entry)) continue
 
       if (
         slowestLapIndex === -1 ||
@@ -900,7 +1064,16 @@ function trimLapTimerEntries() {
       }
     }
 
-    const removalIndex = slowestLapIndex === -1 ? 0 : slowestLapIndex
+    let removalIndex = slowestLapIndex
+
+    if (removalIndex === -1) {
+      removalIndex = raceState.laps.findIndex((entry) => !isLapEntryMirroredByStoredRecord(entry))
+    }
+
+    if (removalIndex === -1) {
+      break
+    }
+
     const [removedEntry] = raceState.laps.splice(removalIndex, 1)
     removedEntry.node.remove()
   }
@@ -912,7 +1085,6 @@ function appendLapTimerEntry() {
   const entry = createLapTimerEntry(raceState.nextLapNumber)
   raceState.nextLapNumber += 1
   raceState.laps.push(entry)
-  lapTimers.append(entry.node)
   trimLapTimerEntries()
   return entry
 }
@@ -930,18 +1102,29 @@ function getCurrentLapEntry() {
 function resetLapTimers() {
   raceState.laps = []
   raceState.nextLapNumber = 1
-  lapTimers.replaceChildren()
   appendLapTimerEntry()
 }
 
 function completeCurrentLap() {
   const currentLapEntry = getCurrentLapEntry()
 
-  if (!currentLapEntry) return
+  if (!currentLapEntry) {
+    return { isNewRecord: false }
+  }
+
+  const isNewRecord =
+    !Number.isFinite(raceState.bestLapTime) ||
+    currentLapEntry.elapsed < raceState.bestLapTime - LAP_RECORD_MATCH_EPSILON
 
   currentLapEntry.completed = true
-  syncLapTimerEntry(currentLapEntry)
+
+  if (isNewRecord) {
+    setBestLapTime(currentLapEntry.elapsed)
+  }
+
   appendLapTimerEntry()
+
+  return { isNewRecord }
 }
 
 function advanceLapTimer(delta) {
@@ -1019,6 +1202,7 @@ function createTrackData() {
     samples.push({
       t,
       point,
+      distance: 0,
       tangent: new THREE.Vector3(),
       flatTangent,
       side,
@@ -1026,6 +1210,24 @@ function createTrackData() {
     })
   }
 
+  updateTrackSampleTangents(samples)
+  updateTrackSampleTurnStrength(samples)
+  const initialTotalDistance = updateTrackSampleDistances(samples)
+  const initialJumpFeature = createTrackJumpFeature(samples, initialTotalDistance)
+  applyTrackJumpProfile(samples, initialJumpFeature, initialTotalDistance)
+  updateTrackSampleTangents(samples)
+  const totalDistance = updateTrackSampleDistances(samples)
+  const jumpFeature = createTrackJumpFeature(samples, totalDistance)
+
+  return {
+    curve: planCurve,
+    samples,
+    totalDistance,
+    jumpFeature,
+  }
+}
+
+function updateTrackSampleTangents(samples) {
   for (let index = 0; index < samples.length; index += 1) {
     const previousSample = samples[(index - 1 + samples.length) % samples.length]
     const nextSample = samples[(index + 1) % samples.length]
@@ -1033,7 +1235,11 @@ function createTrackData() {
       .clone()
       .sub(previousSample.point)
       .normalize()
+  }
+}
 
+function updateTrackSampleTurnStrength(samples) {
+  for (let index = 0; index < samples.length; index += 1) {
     const previous = samples[(index - 1 + samples.length) % samples.length].flatTangent
     const next = samples[(index + 1) % samples.length].flatTangent
     const headingDelta = Math.acos(
@@ -1041,11 +1247,234 @@ function createTrackData() {
     )
     samples[index].turnStrength = Math.min(headingDelta / 0.44, 1)
   }
+}
+
+function updateTrackSampleDistances(samples) {
+  let totalDistance = 0
+
+  for (let index = 0; index < samples.length; index += 1) {
+    const current = samples[index]
+    const next = samples[(index + 1) % samples.length]
+    current.distance = totalDistance
+    totalDistance += current.point.distanceTo(next.point)
+  }
+
+  return totalDistance
+}
+
+function wrapTrackDistance(distance, totalDistance) {
+  if (totalDistance <= 0) return 0
+  return ((distance % totalDistance) + totalDistance) % totalDistance
+}
+
+function getTrackDistanceForward(fromDistance, toDistance, totalDistance) {
+  return wrapTrackDistance(toDistance - fromDistance, totalDistance)
+}
+
+function getTrackZoneProgress(distance, startDistance, length, totalDistance) {
+  if (length <= 0) return null
+
+  const delta = getTrackDistanceForward(startDistance, distance, totalDistance)
+  if (delta > length) return null
+  return THREE.MathUtils.clamp(delta / length, 0, 1)
+}
+
+function isTrackDistanceInZone(distance, startDistance, length, totalDistance) {
+  return getTrackZoneProgress(distance, startDistance, length, totalDistance) !== null
+}
+
+function createTrackJumpFeature(samples, totalDistance) {
+  let bestRun = null
+  let currentRun = null
+
+  const commitRun = (endPassIndex) => {
+    if (!currentRun || currentRun.count >= samples.length) {
+      currentRun = null
+      return
+    }
+
+    if (!bestRun || currentRun.length > bestRun.length) {
+      bestRun = {
+        startSampleIndex: currentRun.startSampleIndex,
+        endSampleIndex:
+          ((endPassIndex - 1) % samples.length + samples.length) % samples.length,
+        count: currentRun.count,
+        length: currentRun.length,
+      }
+    }
+
+    currentRun = null
+  }
+
+  for (let passIndex = 0; passIndex < samples.length * 2; passIndex += 1) {
+    const sampleIndex = passIndex % samples.length
+    const nextSampleIndex = (sampleIndex + 1) % samples.length
+    const isStraight =
+      samples[sampleIndex].turnStrength <= TRACK_STRAIGHT_TURN_THRESHOLD
+
+    if (isStraight) {
+      if (!currentRun) {
+        currentRun = {
+          startSampleIndex: sampleIndex,
+          count: 0,
+          length: 0,
+        }
+      }
+
+      currentRun.count += 1
+      currentRun.length += samples[sampleIndex].point.distanceTo(
+        samples[nextSampleIndex].point,
+      )
+    } else {
+      commitRun(passIndex)
+    }
+  }
+
+  commitRun(samples.length * 2)
+
+  const straightLength = bestRun?.length ?? 0
+  const straightStartDistance = bestRun
+    ? samples[bestRun.startSampleIndex].distance
+    : 0
+  const centerDistance = wrapTrackDistance(
+    straightStartDistance + straightLength * 0.5,
+    totalDistance,
+  )
+  const gapLength = Math.min(TRACK_JUMP_GAP_LENGTH, Math.max(straightLength * 0.032, 1.9))
+  const takeoffLength = Math.min(
+    TRACK_JUMP_TAKEOFF_LENGTH,
+    Math.max(straightLength * 0.058, 3.2),
+  )
+  const landingLength = Math.min(
+    TRACK_JUMP_LANDING_LENGTH,
+    Math.max(straightLength * 0.05, 2.8),
+  )
+  const gapStartDistance = wrapTrackDistance(
+    centerDistance - gapLength * 0.5,
+    totalDistance,
+  )
+  const gapEndDistance = wrapTrackDistance(
+    centerDistance + gapLength * 0.5,
+    totalDistance,
+  )
 
   return {
-    curve: planCurve,
-    samples,
+    straightLength,
+    straightStartSampleIndex: bestRun?.startSampleIndex ?? 0,
+    straightEndSampleIndex: bestRun?.endSampleIndex ?? 0,
+    centerDistance,
+    gapStartDistance,
+    gapLength,
+    gapEndDistance,
+    takeoffStartDistance: wrapTrackDistance(
+      gapStartDistance - takeoffLength,
+      totalDistance,
+    ),
+    takeoffLength,
+    landingStartDistance: gapEndDistance,
+    landingLength,
   }
+}
+
+function applyTrackJumpProfile(samples, jumpFeature, totalDistance) {
+  for (const sample of samples) {
+    const takeoffProgress = getTrackZoneProgress(
+      sample.distance,
+      jumpFeature.takeoffStartDistance,
+      jumpFeature.takeoffLength,
+      totalDistance,
+    )
+
+    if (takeoffProgress !== null) {
+      const takeoffDistance = takeoffProgress * jumpFeature.takeoffLength
+      const climbLength = Math.max(
+        jumpFeature.takeoffLength - TRACK_JUMP_LIP_FLAT_LENGTH,
+        0.001,
+      )
+      const climbProgress = THREE.MathUtils.clamp(
+        takeoffDistance / climbLength,
+        0,
+        1,
+      )
+      const liftProgress = THREE.MathUtils.smootherstep(climbProgress, 0, 1)
+      sample.point.y += TRACK_JUMP_TAKEOFF_LIFT * liftProgress
+    }
+
+    const landingProgress = getTrackZoneProgress(
+      sample.distance,
+      jumpFeature.landingStartDistance,
+      jumpFeature.landingLength,
+      totalDistance,
+    )
+
+    if (landingProgress !== null) {
+      const landingDistance = landingProgress * jumpFeature.landingLength
+      const settleDistance = Math.max(
+        landingDistance - TRACK_JUMP_LANDING_FLAT_LENGTH,
+        0,
+      )
+      const settleLength = Math.max(
+        jumpFeature.landingLength - TRACK_JUMP_LANDING_FLAT_LENGTH,
+        0.001,
+      )
+      const settleProgress =
+        1 - THREE.MathUtils.smootherstep(settleDistance / settleLength, 0, 1)
+      sample.point.y += TRACK_JUMP_LANDING_LIFT * settleProgress
+    }
+  }
+}
+
+function isTrackSegmentVisible(sampleIndex) {
+  const totalSamples = TRACK_DATA.samples.length
+  const normalizedSampleIndex =
+    ((sampleIndex % totalSamples) + totalSamples) % totalSamples
+  const current = TRACK_DATA.samples[normalizedSampleIndex]
+  const next = TRACK_DATA.samples[(normalizedSampleIndex + 1) % totalSamples]
+  const currentInGap = isTrackDistanceInZone(
+    current.distance,
+    TRACK_JUMP.gapStartDistance,
+    TRACK_JUMP.gapLength,
+    TRACK_DATA.totalDistance,
+  )
+  const nextInGap = isTrackDistanceInZone(
+    next.distance,
+    TRACK_JUMP.gapStartDistance,
+    TRACK_JUMP.gapLength,
+    TRACK_DATA.totalDistance,
+  )
+
+  return !currentInGap && !nextInGap
+}
+
+function addTrackCrossSectionCap(
+  positions,
+  sample,
+  halfWidth,
+  thickness,
+  verticalOffset = 0,
+) {
+  const leftTop = sample.point.clone().addScaledVector(sample.side, -halfWidth)
+  leftTop.y += verticalOffset
+
+  const rightTop = sample.point.clone().addScaledVector(sample.side, halfWidth)
+  rightTop.y += verticalOffset
+
+  const leftBottom = leftTop.clone()
+  leftBottom.y -= thickness
+
+  const rightBottom = rightTop.clone()
+  rightBottom.y -= thickness
+
+  addQuad(positions, leftBottom, rightBottom, rightTop, leftTop)
+}
+
+function isTrackFrameInJumpZone(trackFrame) {
+  return isTrackDistanceInZone(
+    trackFrame.distance,
+    TRACK_JUMP.takeoffStartDistance,
+    TRACK_JUMP.takeoffLength + TRACK_JUMP.gapLength + TRACK_JUMP.landingLength,
+    TRACK_DATA.totalDistance,
+  )
 }
 
 function getTrackBounds2D() {
@@ -1087,6 +1516,8 @@ function createTrackRibbonGeometry(halfWidth, thickness, verticalOffset = 0) {
   const positions = []
 
   for (let index = 0; index < TRACK_DATA.samples.length; index += 1) {
+    if (!isTrackSegmentVisible(index)) continue
+
     const current = TRACK_DATA.samples[index]
     const next = TRACK_DATA.samples[(index + 1) % TRACK_DATA.samples.length]
 
@@ -1146,6 +1577,26 @@ function createTrackRibbonGeometry(halfWidth, thickness, verticalOffset = 0) {
       nextLeftBottom,
       nextRightBottom,
     )
+
+    if (!isTrackSegmentVisible(index - 1)) {
+      addTrackCrossSectionCap(
+        positions,
+        current,
+        halfWidth,
+        thickness,
+        verticalOffset,
+      )
+    }
+
+    if (!isTrackSegmentVisible(index + 1)) {
+      addTrackCrossSectionCap(
+        positions,
+        next,
+        halfWidth,
+        thickness,
+        verticalOffset,
+      )
+    }
   }
 
   const geometry = new THREE.BufferGeometry()
@@ -1163,6 +1614,8 @@ function createTrackSurfaceColliderData(halfWidth) {
   let vertexIndex = 0
 
   for (let index = 0; index < TRACK_DATA.samples.length; index += 1) {
+    if (!isTrackSegmentVisible(index)) continue
+
     const current = TRACK_DATA.samples[index]
     const next = TRACK_DATA.samples[(index + 1) % TRACK_DATA.samples.length]
 
@@ -1230,21 +1683,21 @@ function createTrackStripeGeometry(
 ) {
   const positions = []
   const uvs = []
-  const sampleDistances = [0]
+  const segmentStartDistances = new Array(TRACK_DATA.samples.length).fill(0)
   let totalDistance = 0
 
   for (let index = 0; index < TRACK_DATA.samples.length; index += 1) {
+    if (!isTrackSegmentVisible(index)) continue
+
     const current = TRACK_DATA.samples[index]
     const next = TRACK_DATA.samples[(index + 1) % TRACK_DATA.samples.length]
+    segmentStartDistances[index] = totalDistance
     totalDistance += current.point.distanceTo(next.point)
-    sampleDistances.push(totalDistance)
   }
 
-  const normalizedDistances = sampleDistances.map((distance) =>
-    totalDistance > 0 ? distance / totalDistance : 0,
-  )
-
   for (let index = 0; index < TRACK_DATA.samples.length; index += 1) {
+    if (!isTrackSegmentVisible(index)) continue
+
     const current = TRACK_DATA.samples[index]
     const next = TRACK_DATA.samples[(index + 1) % TRACK_DATA.samples.length]
     const currentInner = current.point
@@ -1275,8 +1728,13 @@ function createTrackStripeGeometry(
       nextInner,
     )
 
-    const currentU = normalizedDistances[index]
-    const nextU = normalizedDistances[index + 1]
+    const segmentLength = current.point.distanceTo(next.point)
+    const currentU =
+      totalDistance > 0 ? segmentStartDistances[index] / totalDistance : 0
+    const nextU =
+      totalDistance > 0
+        ? (segmentStartDistances[index] + segmentLength) / totalDistance
+        : 0
     uvs.push(
       currentU, 0,
       currentU, 1,
@@ -1594,6 +2052,8 @@ function createGuardrailGeometry(
   const isRightGuardrail = sideSign > 0
 
   for (let index = 0; index < TRACK_DATA.samples.length; index += 1) {
+    if (!isTrackSegmentVisible(index)) continue
+
     const current = TRACK_DATA.samples[index]
     const next = TRACK_DATA.samples[(index + 1) % TRACK_DATA.samples.length]
     const stripeColor = Math.floor(index / 10) % 2 === 0 ? stripeColorA : stripeColorB
@@ -2322,9 +2782,10 @@ function resumeDrivingAudio() {
 function updateDrivingAudio(delta, trackFrame) {
   if (!audioState.context || audioState.context.state !== 'running') return
 
-  const accelerating = isForwardInputActive()
-  const reversing = keyState.ArrowDown || keyState.KeyS
-  const braking = keyState.Space
+  const driveInput = getDriveInputState()
+  const accelerating = driveInput.accelerate > 0.001
+  const reversing = driveInput.reverse > 0.001
+  const braking = driveInput.brake > 0.001
   const speed = Math.abs(carState.speed)
   const forwardDirection = new THREE.Vector3(
     Math.sin(carState.rotation),
@@ -2347,8 +2808,13 @@ function updateDrivingAudio(delta, trackFrame) {
   const uphillLoad = Math.max(gradeLoad, 0)
   const downhillAssist = Math.max(-gradeLoad, 0)
   const normalizedSpeed = getSpeedRatio(speed, AUDIO_SPEED_REFERENCE)
-  const throttleTarget = accelerating ? 1 : reversing ? 0.72 : 0.14
-  const brakeTarget = braking ? 1 : 0
+  const throttleTarget =
+    driveInput.accelerate > 0.001
+      ? driveInput.accelerate
+      : driveInput.reverse > 0.001
+        ? driveInput.reverse * 0.72
+        : 0.14
+  const brakeTarget = driveInput.brake
   const cornerLoadTarget = THREE.MathUtils.clamp(
     Math.abs(carState.steer) * normalizedSpeed * 1.18 +
       trackFrame.turnStrength * normalizedSpeed * 0.7,
@@ -3119,21 +3585,168 @@ function clearDriveKeys() {
   })
 }
 
+function resetTouchDriveState() {
+  touchDriveState.active = false
+  touchDriveState.pointerId = null
+  touchDriveState.startX = 0
+  touchDriveState.startY = 0
+  touchDriveState.pointerX = 0
+  touchDriveState.pointerY = 0
+  touchDriveState.steer = 0
+  touchDriveState.throttle = 0
+  touchDriveState.brake = 0
+  touchDriveState.reverse = 0
+}
+
+function resetTouchActionState() {
+  touchActionState.boostMode = 'none'
+}
+
+function isTouchDrivePointer(event) {
+  return event.pointerType === 'touch' || event.pointerType === 'pen'
+}
+
+function normalizeTouchDriveAxis(delta) {
+  const magnitude = Math.abs(delta)
+  if (magnitude <= TOUCH_DRIVE_DEADZONE) return 0
+
+  return (
+    (Math.sign(delta) * (magnitude - TOUCH_DRIVE_DEADZONE)) /
+    Math.max(TOUCH_DRIVE_RADIUS - TOUCH_DRIVE_DEADZONE, 1)
+  )
+}
+
+function updateTouchDriveFromPointer(event) {
+  const deltaX = event.clientX - touchDriveState.startX
+  const deltaY = event.clientY - touchDriveState.startY
+  const horizontal = THREE.MathUtils.clamp(normalizeTouchDriveAxis(deltaX), -1, 1)
+  const vertical = THREE.MathUtils.clamp(normalizeTouchDriveAxis(deltaY), -1, 1)
+  const reverseReady =
+    Math.abs(carState.speed) <= TOUCH_DRIVE_REVERSE_SPEED_THRESHOLD ||
+    carState.speed < -0.12
+  const upwardInput = Math.max(0, -vertical)
+  const downwardInput = Math.max(0, vertical)
+  const deliberateBrakeInput = THREE.MathUtils.clamp(
+    (downwardInput - TOUCH_DRIVE_BRAKE_INTENT_THRESHOLD) /
+      Math.max(1 - TOUCH_DRIVE_BRAKE_INTENT_THRESHOLD, 0.001),
+    0,
+    1,
+  )
+  const holdThrottle =
+    deliberateBrakeInput > 0.001 ? 0 : TOUCH_DRIVE_HOLD_THROTTLE
+
+  touchDriveState.pointerX = event.clientX
+  touchDriveState.pointerY = event.clientY
+  touchDriveState.steer = -horizontal
+  if (touchActionState.boostMode !== 'none') {
+    touchDriveState.throttle = 0
+    touchDriveState.brake = 0
+    touchDriveState.reverse = 0
+    return
+  }
+  touchDriveState.throttle = THREE.MathUtils.clamp(
+    holdThrottle + upwardInput * (1 - TOUCH_DRIVE_HOLD_THROTTLE),
+    0,
+    1,
+  )
+  touchDriveState.brake = reverseReady ? 0 : deliberateBrakeInput
+  touchDriveState.reverse = reverseReady ? deliberateBrakeInput : 0
+}
+
+function syncTouchDriveForCurrentMode() {
+  if (!touchDriveState.active) return
+
+  updateTouchDriveFromPointer({
+    clientX: touchDriveState.pointerX,
+    clientY: touchDriveState.pointerY,
+  })
+}
+
+function getDriveInputState() {
+  const digitalSteer =
+    (keyState.ArrowLeft || keyState.KeyA ? 1 : 0) -
+    (keyState.ArrowRight || keyState.KeyD ? 1 : 0)
+  const touchButtonThrottle =
+    prefersTouchControls && touchActionState.boostMode !== 'none'
+      ? TOUCH_DRIVE_HOLD_THROTTLE
+      : 0
+
+  return {
+    accelerate: Math.max(
+      keyState.ArrowUp || keyState.KeyW || keyState.KeyB ? 1 : 0,
+      touchDriveState.throttle,
+      touchButtonThrottle,
+    ),
+    reverse: Math.max(
+      keyState.ArrowDown || keyState.KeyS ? 1 : 0,
+      touchDriveState.reverse,
+    ),
+    brake: Math.max(keyState.Space ? 1 : 0, touchDriveState.brake),
+    steer:
+      Math.abs(touchDriveState.steer) > Math.abs(digitalSteer)
+        ? touchDriveState.steer
+        : digitalSteer,
+  }
+}
+
 function isForwardInputActive() {
-  return keyState.ArrowUp || keyState.KeyW || keyState.KeyB
+  return getDriveInputState().accelerate > 0.001
 }
 
 function hasDriveInput() {
+  const driveInput = getDriveInputState()
   return (
-    isForwardInputActive() ||
-    keyState.ArrowDown ||
-    keyState.ArrowLeft ||
-    keyState.ArrowRight ||
-    keyState.Space ||
-    keyState.KeyA ||
-    keyState.KeyS ||
-    keyState.KeyD
+    driveInput.accelerate > 0.001 ||
+    driveInput.reverse > 0.001 ||
+    driveInput.brake > 0.001 ||
+    Math.abs(driveInput.steer) > 0.001
   )
+}
+
+function createHintChip(label) {
+  const chip = document.createElement('span')
+  chip.textContent = label
+  return chip
+}
+
+function updateControlHints() {
+  if (!minimapHint) return
+
+  minimapHint.classList.toggle('hidden', prefersTouchControls)
+  minimapHint.replaceChildren(
+    ...(prefersTouchControls
+      ? []
+      : [
+          createHintChip('F camera'),
+          createHintChip('R Reset'),
+          createHintChip('B boost'),
+        ]),
+  )
+}
+
+function getRespawnPrompt() {
+  return prefersTouchControls
+    ? 'Tap and drag to respawn'
+    : 'Press R, Enter, or Space to respawn'
+}
+
+function setTouchBoostMode(mode) {
+  if (!prefersTouchControls) return
+
+  const nextMode = raceState.mode === 'racing' ? mode : 'none'
+  touchActionState.boostMode = nextMode
+  touchBoostButton?.classList.toggle('is-active', nextMode === 'boost')
+  touchSuperBoostButton?.classList.toggle('is-active', nextMode === 'superboost')
+
+  if (nextMode !== 'none') {
+    resumeDrivingAudio()
+  }
+  syncTouchDriveForCurrentMode()
+}
+
+function updateTouchControlsUI() {
+  touchBoostButton?.classList.toggle('hidden', !prefersTouchControls)
+  touchSuperBoostButton?.classList.toggle('hidden', !prefersTouchControls)
 }
 
 function threeVectorToRapier(vector) {
@@ -3211,6 +3824,8 @@ function createGuardrailSegmentColliders(
   )
 
   for (let index = 0; index < TRACK_DATA.samples.length; index += 1) {
+    if (!isTrackSegmentVisible(index)) continue
+
     const current = TRACK_DATA.samples[index]
     const next = TRACK_DATA.samples[(index + 1) % TRACK_DATA.samples.length]
     const currentCenter = current.point
@@ -3866,13 +4481,18 @@ function clampVehicleSpeed() {
 
 function updatePhysicsGameOver(trackFrame, delta) {
   const surfaceHeight = trackFrame.surfacePoint.y + PHYSICS_BODY_RIDE_HEIGHT
+  const jumpGrace = isTrackFrameInJumpZone(trackFrame)
+    ? TRACK_JUMP_GAME_OVER_GRACE
+    : 0
   const upDot = new THREE.Vector3(0, 1, 0)
     .applyQuaternion(renderState.quaternion)
     .dot(WORLD_UP)
   const upsideDown =
     upDot < -0.35 &&
     carState.position.y <= surfaceHeight + 0.16
-  const belowTrack = carState.position.y < surfaceHeight - CRASH_BELOW_TRACK_MARGIN
+  const belowTrack =
+    carState.position.y <
+    surfaceHeight - (CRASH_BELOW_TRACK_MARGIN + jumpGrace)
   const outOfTrack =
     Math.abs(trackFrame.lateralOffset) >
       GUARDRAIL_OFFSET + GUARDRAIL_THICKNESS + CRASH_OUT_OF_TRACK_MARGIN ||
@@ -4074,6 +4694,7 @@ function projectTrackFrameOnSegment(position, startSample, endSample) {
   }
 
   const centerPoint = startSample.point.clone().lerp(endSample.point, alpha)
+  const segmentLength = startSample.point.distanceTo(endSample.point)
   const tangent = startSample.tangent.clone().lerp(endSample.tangent, alpha)
   if (tangent.lengthSq() < 0.0001) {
     tangent.copy(endSample.tangent)
@@ -4109,6 +4730,10 @@ function projectTrackFrameOnSegment(position, startSample, endSample) {
       startSample.turnStrength,
       endSample.turnStrength,
       alpha,
+    ),
+    distance: wrapTrackDistance(
+      startSample.distance + segmentLength * alpha,
+      TRACK_DATA.totalDistance,
     ),
     distanceSq,
   }
@@ -4179,6 +4804,7 @@ function getTrackFrame(
     hitLimit: Math.abs(projection.lateralOffset) > lateralLimit + 0.0001,
     section: projection.turnStrength > 0.34 ? 'corner' : 'flow',
     turnStrength: projection.turnStrength,
+    distance: projection.distance,
     sampleIndex,
     nextSampleIndex,
   }
@@ -4201,6 +4827,7 @@ function clampToTrack(position, sampleIndexHint = null) {
 function triggerGameOver(reason = 'wrecked') {
   if (raceState.mode === 'gameOver') return
 
+  setTouchBoostMode('none')
   raceState.mode = 'gameOver'
   raceState.finishTimer = 0
   raceState.superboostActive = false
@@ -4218,10 +4845,10 @@ function triggerGameOver(reason = 'wrecked') {
   setFinishCelebrationContent()
   gameOverSubtitle.textContent =
     reason === 'upsideDown'
-      ? 'Upside down. Press Space to respawn'
+      ? `Upside down. ${getRespawnPrompt()}`
       : reason === 'offTrack'
-        ? 'Press Space to respawn'
-        : 'Press Space to respawn'
+        ? getRespawnPrompt()
+        : getRespawnPrompt()
   gameOverCelebration.classList.add('is-visible')
 }
 
@@ -4238,12 +4865,11 @@ function updateCar(delta) {
   carState.trackSampleIndex = trackFrame.sampleIndex
 
   if (!physicsState.frozen) {
-    const accelerating = isForwardInputActive()
-    const reversing = keyState.ArrowDown || keyState.KeyS
-    const braking = keyState.Space
-    const steeringLeft = keyState.ArrowLeft || keyState.KeyA
-    const steeringRight = keyState.ArrowRight || keyState.KeyD
-    const steeringInput = (steeringLeft ? 1 : 0) - (steeringRight ? 1 : 0)
+    const driveInput = getDriveInputState()
+    const accelerating = driveInput.accelerate > 0.001
+    const reversing = driveInput.reverse > 0.001
+    const braking = driveInput.brake > 0.001
+    const steeringInput = driveInput.steer
     const nearGuardrail =
       Math.abs(trackFrame.lateralOffset) > GUARDRAIL_OFFSET - 0.24
     const driveIntent =
@@ -4283,7 +4909,7 @@ function updateCar(delta) {
         )
       : 1
     const activeBrakeForce = braking
-      ? PHYSICS_BRAKE_FORCE
+      ? THREE.MathUtils.lerp(0, PHYSICS_BRAKE_FORCE, driveInput.brake)
       : brakeOnlyDirectionChange
         ? PHYSICS_DIRECTION_BRAKE_FORCE
         : 0
@@ -4306,6 +4932,11 @@ function updateCar(delta) {
     const targetEngineForce =
       engineDirection *
       directionBlendRatio *
+      (driveIntent > 0
+        ? driveInput.accelerate
+        : driveIntent < 0
+          ? driveInput.reverse
+          : 0) *
       (boostActive ? BOOST_ENGINE_FORCE_MULTIPLIER : 1) *
       THREE.MathUtils.lerp(
         PHYSICS_ENGINE_FORCE,
@@ -4584,7 +5215,7 @@ function syncOrbitCameraFromCurrentView() {
 }
 
 function onCameraPointerDown(event) {
-  if (!renderer) return
+  if (!renderer || isTouchDrivePointer(event)) return
 
   cameraState.mode = 'orbit'
   cameraState.dragging = true
@@ -4596,7 +5227,7 @@ function onCameraPointerDown(event) {
 }
 
 function onCameraPointerMove(event) {
-  if (!cameraState.dragging) return
+  if (!cameraState.dragging || isTouchDrivePointer(event)) return
 
   const deltaX = event.clientX - cameraState.pointerX
   const deltaY = event.clientY - cameraState.pointerY
@@ -4611,7 +5242,8 @@ function onCameraPointerMove(event) {
   )
 }
 
-function onCameraPointerUp() {
+function onCameraPointerUp(event) {
+  if (event && isTouchDrivePointer(event)) return
   cameraState.dragging = false
 
   if (hasDriveInput() || Math.abs(carState.speed) > 0.15) {
@@ -4640,54 +5272,63 @@ function onCameraWheel(event) {
   )
 }
 
+function onTouchDrivePointerDown(event) {
+  if (!renderer || !isTouchDrivePointer(event) || touchDriveState.active) return false
+
+  if (raceState.mode === 'gameOver') {
+    respawnAtTrackStart()
+  }
+
+  touchDriveState.active = true
+  touchDriveState.pointerId = event.pointerId
+  touchDriveState.startX = event.clientX
+  touchDriveState.startY = event.clientY
+  updateTouchDriveFromPointer(event)
+  renderer.domElement.focus()
+  renderer.domElement.setPointerCapture?.(event.pointerId)
+  resumeDrivingAudio()
+  event.preventDefault()
+  return true
+}
+
+function onTouchDrivePointerMove(event) {
+  if (!touchDriveState.active || event.pointerId !== touchDriveState.pointerId) return false
+
+  updateTouchDriveFromPointer(event)
+  event.preventDefault()
+  return true
+}
+
+function onTouchDrivePointerUp(event) {
+  if (!touchDriveState.active || event.pointerId !== touchDriveState.pointerId) return false
+
+  if (renderer?.domElement.hasPointerCapture?.(event.pointerId)) {
+    renderer.domElement.releasePointerCapture(event.pointerId)
+  }
+  resetTouchDriveState()
+  event.preventDefault()
+  return true
+}
+
+function onPointerDown(event) {
+  if (onTouchDrivePointerDown(event)) return
+  onCameraPointerDown(event)
+}
+
+function onPointerMove(event) {
+  if (onTouchDrivePointerMove(event)) return
+  onCameraPointerMove(event)
+}
+
+function onPointerUp(event) {
+  if (onTouchDrivePointerUp(event)) return
+  onCameraPointerUp(event)
+}
+
 function toggleDrivingCameraMode() {
   cameraState.driveMode =
     cameraState.driveMode === 'follow' ? 'firstPerson' : 'follow'
   cameraState.mode = cameraState.driveMode
-}
-
-function cacheMeshModeMaterials(root) {
-  debugViewState.meshMaterials.clear()
-
-  root.traverse((child) => {
-    if (!child.isMesh) return
-
-    const materials = Array.isArray(child.material)
-      ? child.material
-      : [child.material]
-
-    materials.forEach((material) => {
-      if (material) {
-        debugViewState.meshMaterials.add(material)
-      }
-    })
-  })
-}
-
-function setMeshMode(enabled) {
-  debugViewState.meshMode = enabled
-
-  if (!scene) return
-
-  if (debugViewState.meshMaterials.size === 0) {
-    cacheMeshModeMaterials(scene)
-  }
-
-  debugViewState.meshMaterials.forEach((material) => {
-    if ('wireframe' in material) {
-      material.wireframe = enabled
-      material.needsUpdate = true
-    }
-  })
-
-  scene.background = new THREE.Color(enabled ? 0xf8fafc : DAY_SKY_COLOR)
-  scene.fog = enabled ? null : new THREE.Fog(DAY_FOG_COLOR, 52, 160)
-
-  if (carShadow) carShadow.visible = !enabled
-}
-
-function toggleMeshMode() {
-  setMeshMode(!debugViewState.meshMode)
 }
 
 async function createGameScene() {
@@ -4710,10 +5351,14 @@ async function createGameScene() {
   renderer.domElement.tabIndex = 0
   renderer.domElement.style.touchAction = 'none'
   canvasMount.appendChild(renderer.domElement)
-  renderer.domElement.addEventListener('pointerdown', onCameraPointerDown)
+  renderer.domElement.addEventListener('contextmenu', (event) => {
+    event.preventDefault()
+  })
+  renderer.domElement.addEventListener('pointerdown', onPointerDown)
   renderer.domElement.addEventListener('wheel', onCameraWheel, { passive: false })
-  window.addEventListener('pointermove', onCameraPointerMove)
-  window.addEventListener('pointerup', onCameraPointerUp)
+  window.addEventListener('pointermove', onPointerMove)
+  window.addEventListener('pointerup', onPointerUp)
+  window.addEventListener('pointercancel', onPointerUp)
   resizeMinimapCanvas()
 
   addDayEnvironment()
@@ -4814,9 +5459,6 @@ async function createGameScene() {
   boostParticleSystem = createBoostParticleSystem()
   scene.add(boostParticleSystem)
 
-  cacheMeshModeMaterials(scene)
-  setMeshMode(debugViewState.meshMode)
-
   await ensurePhysicsWorld(
     track.geometry,
     leftGuardrail.geometry,
@@ -4865,6 +5507,9 @@ async function showGameScreen() {
 
 function resetRaceSession() {
   clearDriveKeys()
+  resetTouchDriveState()
+  resetTouchActionState()
+  setTouchBoostMode('none')
   raceState.mode = 'racing'
   raceState.lapArmed = false
   raceState.finishTimer = 0
@@ -4981,15 +5626,27 @@ function onWindowResize() {
   resizeMinimapCanvas()
 }
 
+function respawnAtTrackStart() {
+  resetRaceSession()
+  renderer?.domElement.focus()
+  resumeDrivingAudio()
+}
+
 function setDriveKey(event, isPressed) {
   if (
     raceState.mode === 'gameOver' &&
     isPressed &&
-    (event.code === 'Enter' || event.code === 'Space')
+    (event.code === 'Enter' || event.code === 'Space' || event.code === 'KeyR')
   ) {
-    resetRaceSession()
-    renderer?.domElement.focus()
-    resumeDrivingAudio()
+    respawnAtTrackStart()
+    event.preventDefault()
+    return
+  }
+
+  if (event.code === 'KeyR') {
+    if (isPressed && !event.repeat) {
+      respawnAtTrackStart()
+    }
     event.preventDefault()
     return
   }
@@ -4997,14 +5654,6 @@ function setDriveKey(event, isPressed) {
   if (event.code === 'KeyF') {
     if (isPressed && !event.repeat) {
       toggleDrivingCameraMode()
-    }
-    event.preventDefault()
-    return
-  }
-
-  if (event.code === 'KeyM') {
-    if (isPressed && !event.repeat) {
-      toggleMeshMode()
     }
     event.preventDefault()
     return
@@ -5027,6 +5676,70 @@ function setDriveKey(event, isPressed) {
 
 startButton.addEventListener('click', () => {
   void showGameScreen()
+})
+updateControlHints()
+updateTouchControlsUI()
+touchBoostButton?.addEventListener('pointerdown', (event) => {
+  if (!isTouchDrivePointer(event)) return
+  event.preventDefault()
+  touchBoostButton.setPointerCapture?.(event.pointerId)
+  setTouchBoostMode('boost')
+})
+touchBoostButton?.addEventListener('pointerup', (event) => {
+  if (!isTouchDrivePointer(event)) return
+  event.preventDefault()
+  if (touchBoostButton.hasPointerCapture?.(event.pointerId)) {
+    touchBoostButton.releasePointerCapture(event.pointerId)
+  }
+  if (touchActionState.boostMode === 'boost') {
+    setTouchBoostMode('none')
+  }
+})
+touchBoostButton?.addEventListener('pointercancel', (event) => {
+  if (!isTouchDrivePointer(event)) return
+  event.preventDefault()
+  if (touchBoostButton.hasPointerCapture?.(event.pointerId)) {
+    touchBoostButton.releasePointerCapture(event.pointerId)
+  }
+  if (touchActionState.boostMode === 'boost') {
+    setTouchBoostMode('none')
+  }
+})
+touchBoostButton?.addEventListener('lostpointercapture', () => {
+  if (touchActionState.boostMode === 'boost') {
+    setTouchBoostMode('none')
+  }
+})
+touchSuperBoostButton?.addEventListener('pointerdown', (event) => {
+  if (!isTouchDrivePointer(event)) return
+  event.preventDefault()
+  touchSuperBoostButton.setPointerCapture?.(event.pointerId)
+  setTouchBoostMode('superboost')
+})
+touchSuperBoostButton?.addEventListener('pointerup', (event) => {
+  if (!isTouchDrivePointer(event)) return
+  event.preventDefault()
+  if (touchSuperBoostButton.hasPointerCapture?.(event.pointerId)) {
+    touchSuperBoostButton.releasePointerCapture(event.pointerId)
+  }
+  if (touchActionState.boostMode === 'superboost') {
+    setTouchBoostMode('none')
+  }
+})
+touchSuperBoostButton?.addEventListener('pointercancel', (event) => {
+  if (!isTouchDrivePointer(event)) return
+  event.preventDefault()
+  if (touchSuperBoostButton.hasPointerCapture?.(event.pointerId)) {
+    touchSuperBoostButton.releasePointerCapture(event.pointerId)
+  }
+  if (touchActionState.boostMode === 'superboost') {
+    setTouchBoostMode('none')
+  }
+})
+touchSuperBoostButton?.addEventListener('lostpointercapture', () => {
+  if (touchActionState.boostMode === 'superboost') {
+    setTouchBoostMode('none')
+  }
 })
 window.addEventListener('resize', onWindowResize)
 window.addEventListener('keydown', (event) => setDriveKey(event, true))
