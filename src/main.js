@@ -50,6 +50,7 @@ let latestRoomLookupId = 0
 let copyRoomResetTimer = null
 let identityMessageSource = 'neutral'
 let previousConnectionStatus = multiplayer.getState().connectionStatus
+let previousLapSubmissionResolvedAt = null
 let roomSummary = {
   roomId: null,
   activePlayerCount: 0,
@@ -186,6 +187,45 @@ function formatLeaderboardDate(timestamp) {
 function formatRoomLabel(roomId) {
   if (typeof roomId !== 'string' || !roomId.trim()) return ''
   return roomId.trim()
+}
+
+function getLapSubmissionStatus(state) {
+  if (state.pendingLapSubmission?.lapNumber) {
+    return {
+      text: `Saving lap ${state.pendingLapSubmission.lapNumber}...`,
+      tone: 'neutral',
+    }
+  }
+
+  if (!state.lastLapSubmission?.status) {
+    return null
+  }
+
+  if (state.lastLapSubmission.status === 'accepted') {
+    const resolvedTime = Number.isFinite(state.lastLapSubmission.officialLapMs)
+      ? formatLapMs(state.lastLapSubmission.officialLapMs)
+      : Number.isFinite(state.lastLapSubmission.lapMs)
+        ? formatLapMs(state.lastLapSubmission.lapMs)
+        : null
+
+    return {
+      text: resolvedTime
+        ? `Lap ${state.lastLapSubmission.lapNumber} saved at ${resolvedTime}.`
+        : `Lap ${state.lastLapSubmission.lapNumber} saved.`,
+      tone: 'success',
+    }
+  }
+
+  if (state.lastLapSubmission.status === 'rejected') {
+    return {
+      text:
+        state.lastLapSubmission.message ??
+        `Lap ${state.lastLapSubmission.lapNumber} was not saved.`,
+      tone: 'error',
+    }
+  }
+
+  return null
 }
 
 function renderLeaderboardError(container, message) {
@@ -425,6 +465,12 @@ function renderRoomStatus(state = multiplayer.getState()) {
     statusText = `Connected to ${state.roomId}. Waiting for the room countdown.`
   }
 
+  const lapSubmissionStatus = getLapSubmissionStatus(state)
+  if (lapSubmissionStatus?.text) {
+    statusText = [statusText, lapSubmissionStatus.text].filter(Boolean).join(' ')
+    tone = lapSubmissionStatus.tone
+  }
+
   if (roomStatusMessage) {
     roomStatusMessage.textContent = statusText
     roomStatusMessage.dataset.tone = tone
@@ -633,7 +679,17 @@ multiplayer.subscribe((state) => {
     setIdentityMessage(state.lastError, 'error', 'connection-error')
   }
 
+  const lapSubmissionResolvedAt = state.lastLapSubmission?.resolvedAt ?? null
+  if (
+    state.lastLapSubmission?.status === 'accepted' &&
+    lapSubmissionResolvedAt &&
+    lapSubmissionResolvedAt !== previousLapSubmissionResolvedAt
+  ) {
+    void loadLeaderboards()
+  }
+
   previousConnectionStatus = state.connectionStatus
+  previousLapSubmissionResolvedAt = lapSubmissionResolvedAt
   renderRoomStatus(state)
   if (state.roomStatus === 'finished') {
     void loadLeaderboards()

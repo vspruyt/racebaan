@@ -17,6 +17,8 @@ function createInitialState() {
     raceStartedAt: null,
     connectedPlayers: [],
     remotePlayers: new Map(),
+    pendingLapSubmission: null,
+    lastLapSubmission: null,
     lastError: null,
   }
 }
@@ -67,6 +69,26 @@ export function createMultiplayerClient({ identityProvider }) {
     return socket === candidate
   }
 
+  function createLapSubmissionResult(status, details = {}) {
+    return {
+      status,
+      lapNumber: details.lapNumber ?? null,
+      lapMs: details.lapMs ?? null,
+      officialLapMs: details.officialLapMs ?? null,
+      message: details.message ?? '',
+      resolvedAt: details.resolvedAt ?? Date.now(),
+    }
+  }
+
+  function isLapSubmissionError(code) {
+    return [
+      'not_joined',
+      'race_not_started',
+      'invalid_lap_number',
+      'invalid_lap_time',
+    ].includes(code)
+  }
+
   function handleServerMessage(message) {
     switch (message.type) {
       case 'joined':
@@ -77,6 +99,8 @@ export function createMultiplayerClient({ identityProvider }) {
           trackId: message.trackId ?? DEFAULT_TRACK_ID,
           raceLaps: message.raceLaps ?? RACE_LAPS,
           countdownMs: message.countdownMs ?? null,
+          pendingLapSubmission: null,
+          lastLapSubmission: null,
           lastError: null,
         })
         break
@@ -119,12 +143,16 @@ export function createMultiplayerClient({ identityProvider }) {
           countdownStartedAt:
             (message.startsAt ?? Date.now()) - (message.countdownMs ?? 0),
           countdownMs: message.countdownMs ?? state.countdownMs,
+          pendingLapSubmission: null,
+          lastLapSubmission: null,
         })
         break
       case 'race_started':
         setState({
           roomStatus: 'racing',
           raceStartedAt: message.startedAt ?? Date.now(),
+          pendingLapSubmission: null,
+          lastLapSubmission: null,
         })
         break
       case 'state_snapshot': {
@@ -171,13 +199,46 @@ export function createMultiplayerClient({ identityProvider }) {
         })
         break
       case 'error':
+        if (isLapSubmissionError(message.code) && state.pendingLapSubmission) {
+          setState({
+            pendingLapSubmission: null,
+            lastLapSubmission: createLapSubmissionResult('rejected', {
+              lapNumber: state.pendingLapSubmission.lapNumber,
+              lapMs: state.pendingLapSubmission.lapMs,
+              message: message.message ?? 'Lap time was not accepted by the server.',
+            }),
+            lastError: message.message ?? 'Unknown websocket error.',
+          })
+          break
+        }
+
         setState({
           lastError: message.message ?? 'Unknown websocket error.',
         })
         break
       case 'pong':
-      case 'lap_completed':
         break
+      case 'lap_completed': {
+        const localIdentity = identityProvider()
+        const isLocalLap =
+          message.anonymousPlayerId === localIdentity.anonymousPlayerId
+
+        if (!isLocalLap) {
+          break
+        }
+
+        setState({
+          pendingLapSubmission: null,
+          lastLapSubmission: createLapSubmissionResult('accepted', {
+            lapNumber: message.lapNumber ?? state.pendingLapSubmission?.lapNumber,
+            lapMs: state.pendingLapSubmission?.lapMs ?? null,
+            officialLapMs: message.lapMs ?? null,
+            message: 'Lap time saved to the leaderboard.',
+          }),
+          lastError: null,
+        })
+        break
+      }
       default:
         console.warn('Unknown multiplayer message', message)
     }
@@ -293,9 +354,32 @@ export function createMultiplayerClient({ identityProvider }) {
   }
 
   function reportLapCompleted(lapEvent) {
-    sendMessage({
+    const sent = sendMessage({
       type: 'lap_completed',
       ...lapEvent,
+    })
+
+    if (sent) {
+      setState({
+        pendingLapSubmission: {
+          lapNumber: lapEvent.lapNumber ?? null,
+          lapMs: lapEvent.lapMs ?? null,
+          submittedAt: Date.now(),
+        },
+        lastLapSubmission: null,
+        lastError: null,
+      })
+      return
+    }
+
+    setState({
+      pendingLapSubmission: null,
+      lastLapSubmission: createLapSubmissionResult('rejected', {
+        lapNumber: lapEvent.lapNumber ?? null,
+        lapMs: lapEvent.lapMs ?? null,
+        message: 'Could not submit lap time because the room connection was not ready.',
+      }),
+      lastError: 'Could not submit lap time because the room connection was not ready.',
     })
   }
 
@@ -320,6 +404,10 @@ export function createMultiplayerClient({ identityProvider }) {
       ...state,
       remotePlayers: new Map(state.remotePlayers),
       connectedPlayers: [...state.connectedPlayers],
+      pendingLapSubmission: state.pendingLapSubmission
+        ? { ...state.pendingLapSubmission }
+        : null,
+      lastLapSubmission: state.lastLapSubmission ? { ...state.lastLapSubmission } : null,
     }
   }
 

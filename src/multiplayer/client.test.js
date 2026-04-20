@@ -129,4 +129,125 @@ describe('createMultiplayerClient', () => {
     expect(client.getState().roomId).toBe('room-test')
     expect(client.getState().lastError).toBe('Could not connect to the room.')
   })
+
+  it('tracks a local lap submission until the server acknowledges it', () => {
+    globalThis.window = {
+      clearInterval: vi.fn(),
+      setInterval: vi.fn(() => 1),
+    }
+    globalThis.WebSocket = MockWebSocket
+    globalThis.location = {
+      protocol: 'https:',
+      host: 'racebaan.test',
+    }
+
+    const client = createMultiplayerClient({
+      identityProvider: createIdentityProvider(),
+    })
+
+    client.connect({ roomId: 'room-test', trackId: DEFAULT_TRACK_ID })
+    const socket = MockWebSocket.instances[0]
+    socket.readyState = MockWebSocket.OPEN
+    socket.emit('open')
+    socket.emit('message', {
+      data: JSON.stringify({
+        type: 'joined',
+        roomId: 'room-test',
+        roomStatus: 'lobby',
+        trackId: DEFAULT_TRACK_ID,
+      }),
+    })
+    socket.emit('message', {
+      data: JSON.stringify({
+        type: 'race_started',
+        startedAt: Date.now(),
+      }),
+    })
+
+    client.reportLapCompleted({
+      lapNumber: 1,
+      lapMs: 22333,
+    })
+
+    expect(client.getState().pendingLapSubmission).toMatchObject({
+      lapNumber: 1,
+      lapMs: 22333,
+    })
+    expect(client.getState().lastLapSubmission).toBeNull()
+
+    socket.emit('message', {
+      data: JSON.stringify({
+        type: 'lap_completed',
+        anonymousPlayerId: '123e4567-e89b-42d3-a456-426614174000',
+        lapNumber: 1,
+        lapMs: 22476,
+      }),
+    })
+
+    expect(client.getState().pendingLapSubmission).toBeNull()
+    expect(client.getState().lastLapSubmission).toMatchObject({
+      status: 'accepted',
+      lapNumber: 1,
+      lapMs: 22333,
+      officialLapMs: 22476,
+    })
+    expect(client.getState().lastError).toBeNull()
+  })
+
+  it('shows lap submission errors when the server rejects a lap', () => {
+    globalThis.window = {
+      clearInterval: vi.fn(),
+      setInterval: vi.fn(() => 1),
+    }
+    globalThis.WebSocket = MockWebSocket
+    globalThis.location = {
+      protocol: 'https:',
+      host: 'racebaan.test',
+    }
+
+    const client = createMultiplayerClient({
+      identityProvider: createIdentityProvider(),
+    })
+
+    client.connect({ roomId: 'room-test', trackId: DEFAULT_TRACK_ID })
+    const socket = MockWebSocket.instances[0]
+    socket.readyState = MockWebSocket.OPEN
+    socket.emit('open')
+    socket.emit('message', {
+      data: JSON.stringify({
+        type: 'joined',
+        roomId: 'room-test',
+        roomStatus: 'lobby',
+        trackId: DEFAULT_TRACK_ID,
+      }),
+    })
+    socket.emit('message', {
+      data: JSON.stringify({
+        type: 'race_started',
+        startedAt: Date.now(),
+      }),
+    })
+
+    client.reportLapCompleted({
+      lapNumber: 1,
+      lapMs: 22333,
+    })
+
+    socket.emit('message', {
+      data: JSON.stringify({
+        type: 'error',
+        code: 'invalid_lap_time',
+        message: 'Lap timing did not pass basic validation.',
+      }),
+    })
+
+    expect(client.getState().pendingLapSubmission).toBeNull()
+    expect(client.getState().lastLapSubmission).toMatchObject({
+      status: 'rejected',
+      lapNumber: 1,
+      lapMs: 22333,
+      message: 'Lap timing did not pass basic validation.',
+    })
+    expect(client.getState().lastError).toBe('Lap timing did not pass basic validation.')
+  })
 })
