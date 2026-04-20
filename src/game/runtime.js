@@ -574,6 +574,20 @@ function releaseBrakeHold() {
   physicsState.brakeHoldActive = false
 }
 
+function shouldDisableSideContainment(trackFrame) {
+  if (trackSystem.isTrackFrameInJumpZone(trackFrame)) {
+    return true
+  }
+
+  const wheelContactCount = getWheelContactCount()
+  if (wheelContactCount < 2) {
+    return true
+  }
+
+  const guardrailTopHeight = trackFrame.surfacePoint.y + GUARDRAIL_HEIGHT + 0.08
+  return carState.position.y > guardrailTopHeight
+}
+
 function shouldApplyBrakeHold(braking, driveIntent) {
   if (
     !braking ||
@@ -1273,6 +1287,7 @@ function updateCar(delta) {
   const previousPosition = carState.position.clone()
   const trackFrame = trackSystem.getTrackFrame(carState.position, carState.trackSampleIndex)
   carState.trackSampleIndex = trackFrame.sampleIndex
+  const sideContainmentDisabled = shouldDisableSideContainment(trackFrame)
 
   if (!physicsState.frozen) {
     const driveInput = inputSystem.getDriveInputState()
@@ -1386,8 +1401,10 @@ function updateCar(delta) {
     applyBrakeAssist(delta, braking)
     applyDirectionChangeAssist(delta, driveIntent)
     applySteerAssist(delta, steeringInput, carState.speed, nearGuardrail)
-    applyTrackEscapeAssist(trackFrame, delta, steeringInput, driveIntent)
-    applyGuardrailReleaseAssist(trackFrame, delta, steeringInput, driveIntent)
+    if (!sideContainmentDisabled) {
+      applyTrackEscapeAssist(trackFrame, delta, steeringInput, driveIntent)
+      applyGuardrailReleaseAssist(trackFrame, delta, steeringInput, driveIntent)
+    }
     applyUprightAssist(trackFrame, delta)
     applyPitchStabilityAssist(delta, driveIntent)
 
@@ -1402,7 +1419,9 @@ function updateCar(delta) {
       applyBrakeHold()
     } else {
       releaseBrakeHold()
-      applyGuardrailGlideAssist(trackFrame, steeringInput, driveIntent)
+      if (!sideContainmentDisabled) {
+        applyGuardrailGlideAssist(trackFrame, steeringInput, driveIntent)
+      }
     }
     clampVehicleSpeed()
   }
