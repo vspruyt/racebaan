@@ -1105,7 +1105,41 @@ export function createTrackSystem({
     minimapContext.stroke()
   }
 
-  function drawMinimap(trackFrame) {
+  function drawMinimapPlayerMarker(
+    point,
+    rotation,
+    {
+      glowStyle = 'rgba(249, 115, 22, 0.28)',
+      fillStyle = '#f8fafc',
+      strokeStyle = '#f97316',
+      glowRadius = Math.max(minimapState.roadWidth * 0.72, 7),
+      markerSize = 8,
+      lineWidth = 2,
+    } = {},
+  ) {
+    minimapContext.fillStyle = glowStyle
+    minimapContext.beginPath()
+    minimapContext.arc(point.x, point.y, glowRadius, 0, Math.PI * 2)
+    minimapContext.fill()
+
+    minimapContext.save()
+    minimapContext.translate(point.x, point.y)
+    minimapContext.rotate(rotation)
+    minimapContext.beginPath()
+    minimapContext.moveTo(0, -markerSize)
+    minimapContext.lineTo(markerSize * 0.72, markerSize * 0.88)
+    minimapContext.lineTo(0, markerSize * 0.4)
+    minimapContext.lineTo(-markerSize * 0.72, markerSize * 0.88)
+    minimapContext.closePath()
+    minimapContext.fillStyle = fillStyle
+    minimapContext.fill()
+    minimapContext.lineWidth = lineWidth
+    minimapContext.strokeStyle = strokeStyle
+    minimapContext.stroke()
+    minimapContext.restore()
+  }
+
+  function drawMinimap(trackFrame, remotePlayers = []) {
     if (!minimapContext) return
 
     if (minimapState.width === 0 || minimapState.height === 0) {
@@ -1213,33 +1247,25 @@ export function createTrackSystem({
       'rgba(249, 115, 22, 0.92)',
     )
 
-    const carPoint = projectPointToMinimap(trackFrame.surfacePoint)
-    minimapContext.fillStyle = 'rgba(249, 115, 22, 0.28)'
-    minimapContext.beginPath()
-    minimapContext.arc(
-      carPoint.x,
-      carPoint.y,
-      Math.max(minimapState.roadWidth * 0.72, 7),
-      0,
-      Math.PI * 2,
-    )
-    minimapContext.fill()
+    for (const remotePlayer of remotePlayers) {
+      if (!remotePlayer?.position) continue
 
-    minimapContext.save()
-    minimapContext.translate(carPoint.x, carPoint.y)
-    minimapContext.rotate(renderState.rotation)
-    minimapContext.beginPath()
-    minimapContext.moveTo(0, -8)
-    minimapContext.lineTo(5.8, 7)
-    minimapContext.lineTo(0, 3.2)
-    minimapContext.lineTo(-5.8, 7)
-    minimapContext.closePath()
-    minimapContext.fillStyle = '#f8fafc'
-    minimapContext.fill()
-    minimapContext.lineWidth = 2
-    minimapContext.strokeStyle = '#f97316'
-    minimapContext.stroke()
-    minimapContext.restore()
+      drawMinimapPlayerMarker(
+        projectPointToMinimap(remotePlayer.position),
+        remotePlayer.rotation ?? 0,
+        {
+          glowStyle: remotePlayer.glowStyle ?? 'rgba(59, 130, 246, 0.22)',
+          fillStyle: remotePlayer.fillStyle ?? 'rgba(248, 250, 252, 0.98)',
+          strokeStyle: remotePlayer.strokeStyle ?? '#38bdf8',
+          glowRadius: Math.max(minimapState.roadWidth * 0.52, 5),
+          markerSize: 6.6,
+          lineWidth: 1.7,
+        },
+      )
+    }
+
+    const carPoint = projectPointToMinimap(trackFrame.surfacePoint)
+    drawMinimapPlayerMarker(carPoint, renderState.rotation)
   }
 
   return {

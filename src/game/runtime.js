@@ -548,6 +548,7 @@ function createRemotePlayerVisual(anonymousPlayerId) {
   const hueSeed = anonymousPlayerId
     .split('')
     .reduce((total, character) => total + character.charCodeAt(0), 0)
+  const hue = hueSeed % 360
   const bodyColor = new THREE.Color().setHSL((hueSeed % 360) / 360, 0.68, 0.55)
   const accentColor = bodyColor.clone().offsetHSL(0.08, 0.02, 0.08)
   const group = new THREE.Group()
@@ -588,7 +589,34 @@ function createRemotePlayerVisual(anonymousPlayerId) {
     interpolationEndQuaternion: new THREE.Quaternion(),
     targetPosition: new THREE.Vector3(),
     targetQuaternion: new THREE.Quaternion(),
+    minimapGlowStyle: `hsla(${hue} 90% 62% / 0.22)`,
+    minimapStrokeStyle: `hsl(${hue} 78% 58%)`,
   }
+}
+
+function getQuaternionYaw(quaternion) {
+  const forwardDirection = new THREE.Vector3(0, 0, 1).applyQuaternion(quaternion)
+  return Math.atan2(forwardDirection.x, forwardDirection.z)
+}
+
+function getRemotePlayerMinimapMarkers() {
+  if (!multiplayer || remotePlayerVisuals.size === 0) {
+    return []
+  }
+
+  const markers = []
+  for (const visual of remotePlayerVisuals.values()) {
+    if (!visual.hasInitialTransform) continue
+
+    markers.push({
+      position: visual.group.position,
+      rotation: getQuaternionYaw(visual.group.quaternion),
+      glowStyle: visual.minimapGlowStyle,
+      strokeStyle: visual.minimapStrokeStyle,
+    })
+  }
+
+  return markers
 }
 
 function queueRemotePlayerSnapshot(visual, player) {
@@ -758,6 +786,10 @@ function syncMultiplayerRoomStatus(force = false) {
       applyLocalRaceCountdownGate()
       return
     }
+    if (raceState.mode === 'gameOver') {
+      physicsState.frozen = true
+      return
+    }
     raceState.mode = 'racing'
     physicsState.frozen = false
     return
@@ -765,7 +797,9 @@ function syncMultiplayerRoomStatus(force = false) {
 
   const roomStatus = getMultiplayerRoomStatus()
   const waitingForLocalRaceCountdown =
-    roomStatus === 'racing' && raceState.mode !== 'racing'
+    roomStatus === 'racing' &&
+    raceState.mode !== 'racing' &&
+    raceState.mode !== 'gameOver'
   if (!force && roomStatus === lastMultiplayerRoomStatus && !waitingForLocalRaceCountdown) {
     return
   }
@@ -803,6 +837,10 @@ function syncMultiplayerRoomStatus(force = false) {
     }
     if (updateLocalRaceCountdownUi()) {
       applyLocalRaceCountdownGate()
+      return
+    }
+    if (raceState.mode === 'gameOver') {
+      physicsState.frozen = true
       return
     }
     raceState.mode = 'racing'
@@ -2055,7 +2093,7 @@ function updateRenderState(delta, alpha = 1) {
   speedometerValue.textContent = String(
     Math.round(Math.abs(carState.speed) * SPEED_TO_KMH),
   )
-  trackSystem.drawMinimap(trackFrame)
+  trackSystem.drawMinimap(trackFrame, getRemotePlayerMinimapMarkers())
   updateWheelVisuals(delta)
 
   raceCar.position.copy(renderState.position)
