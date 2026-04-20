@@ -16,6 +16,7 @@ export function createInputSystem({
   raceState,
   carState,
   minimapHint,
+  touchControls,
   touchBoostButton,
   touchSuperBoostButton,
   resumeDrivingAudio,
@@ -185,6 +186,7 @@ export function createInputSystem({
   }
 
   function updateTouchControlsUI() {
+    touchControls?.classList.toggle('is-touch-layout', prefersTouchControls)
     touchBoostButton?.classList.toggle('hidden', !prefersTouchControls)
     touchSuperBoostButton?.classList.toggle('hidden', !prefersTouchControls)
   }

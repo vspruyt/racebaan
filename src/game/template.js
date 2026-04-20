@@ -24,10 +24,22 @@ export const APP_TEMPLATE = `
       <div class="lap-timers" aria-live="polite" aria-relevant="additions text"></div>
     </div>
     <div class="touch-controls">
-      <button class="touch-boost hidden" type="button" aria-label="Boost">Boost</button>
-      <button class="touch-superboost hidden" type="button" aria-label="Super Boost">
-        Super Boost
-      </button>
+      <div class="touch-actions">
+        <button class="touch-boost hidden" type="button" aria-label="Hold for Boost">
+          <span class="touch-button-kicker">Hold</span>
+          <span class="touch-button-label">Boost</span>
+          <span class="touch-button-meta">keep pressed</span>
+        </button>
+        <button
+          class="touch-superboost hidden"
+          type="button"
+          aria-label="Hold for Super Boost"
+        >
+          <span class="touch-button-kicker">Hold</span>
+          <span class="touch-button-label">Super Boost</span>
+          <span class="touch-button-meta">keep pressed</span>
+        </button>
+      </div>
       <div class="minimap" aria-hidden="true">
         <span class="minimap-label">Track Map</span>
         <span class="minimap-hint">

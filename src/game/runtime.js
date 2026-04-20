@@ -229,6 +229,7 @@ const minimapContext = minimapCanvas.getContext('2d')
 const minimapHint = app.querySelector('.minimap-hint')
 const touchBoostButton = app.querySelector('.touch-boost')
 const touchSuperBoostButton = app.querySelector('.touch-superboost')
+const touchControls = app.querySelector('.touch-controls')
 const finishCelebration = app.querySelector('.finish-celebration')
 const finishParticleLayer = app.querySelector('.finish-particles')
 const finishKicker = finishCelebration.querySelector('.finish-kicker')
@@ -340,6 +341,7 @@ const inputSystem = createInputSystem({
   raceState,
   carState,
   minimapHint,
+  touchControls,
   touchBoostButton,
   touchSuperBoostButton,
   resumeDrivingAudio: () => audioSystem.resumeDrivingAudio(),

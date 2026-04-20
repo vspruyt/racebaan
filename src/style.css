@@ -70,7 +70,7 @@ canvas {
 }
 
 .hidden {
-  display: none;
+  display: none !important;
 }
 
 .screen-home {
@@ -243,12 +243,14 @@ canvas {
 
 .touch-controls {
   position: absolute;
+  left: calc(var(--overlay-gap) + var(--safe-left));
   right: calc(var(--overlay-gap) + var(--safe-right));
   bottom: calc(var(--overlay-gap) + var(--safe-bottom));
   z-index: 3;
-  display: grid;
-  justify-items: end;
-  gap: 0.8rem;
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 1rem;
   pointer-events: none;
   user-select: none;
   -webkit-user-select: none;
@@ -256,19 +258,35 @@ canvas {
   touch-action: none;
 }
 
+.touch-actions {
+  display: grid;
+  gap: 0.8rem;
+  justify-items: start;
+  pointer-events: none;
+}
+
+.touch-controls.is-touch-layout .touch-actions {
+  order: 2;
+  justify-items: end;
+}
+
+.touch-controls.is-touch-layout .minimap {
+  order: 1;
+}
+
 .touch-boost,
 .touch-superboost {
-  min-width: 6.6rem;
-  padding: 0.85rem 1rem;
-  border-radius: 999px;
+  position: relative;
+  display: grid;
+  gap: 0.15rem;
+  min-width: 8.5rem;
+  padding: 0.8rem 1rem 0.9rem;
+  border-radius: 1.35rem;
   box-shadow:
     0 0.9rem 2rem rgba(15, 23, 42, 0.24),
     0 0 1.25rem rgba(249, 115, 22, 0.16);
   font-family: Arial, sans-serif;
-  font-size: 0.78rem;
-  font-weight: 800;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
+  text-align: left;
   color: #fff7ed;
   pointer-events: auto;
   touch-action: none;
@@ -276,6 +294,30 @@ canvas {
   -webkit-user-select: none;
   -webkit-touch-callout: none;
   -webkit-tap-highlight-color: transparent;
+  overflow: hidden;
+}
+
+.touch-boost::before,
+.touch-superboost::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.16), transparent 36%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent 58%);
+  pointer-events: none;
+}
+
+.touch-boost::after,
+.touch-superboost::after {
+  content: '';
+  position: absolute;
+  inset: auto 0.9rem 0.55rem;
+  height: 0.18rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  pointer-events: none;
 }
 
 .touch-boost {
@@ -301,6 +343,37 @@ canvas {
   box-shadow:
     0 0.45rem 1.2rem rgba(15, 23, 42, 0.28),
     0 0 1.8rem rgba(255, 255, 255, 0.22);
+}
+
+.touch-button-kicker,
+.touch-button-label,
+.touch-button-meta {
+  position: relative;
+  z-index: 1;
+}
+
+.touch-button-kicker {
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: rgba(255, 243, 224, 0.74);
+}
+
+.touch-button-label {
+  font-size: 0.92rem;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #fff7ed;
+}
+
+.touch-button-meta {
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 243, 224, 0.78);
 }
 
 .touch-boost.is-active {
@@ -909,9 +982,17 @@ code {
 
   .touch-boost,
   .touch-superboost {
-    min-width: 6rem;
-    padding: 0.78rem 0.95rem;
-    font-size: 0.73rem;
+    min-width: 7.4rem;
+    padding: 0.72rem 0.9rem 0.82rem;
+  }
+
+  .touch-button-label {
+    font-size: 0.82rem;
+  }
+
+  .touch-button-kicker,
+  .touch-button-meta {
+    font-size: 0.54rem;
   }
 
   .finish-notice {
@@ -939,9 +1020,17 @@ code {
 
   .touch-boost,
   .touch-superboost {
-    min-width: 5.6rem;
-    padding: 0.72rem 0.9rem;
-    font-size: 0.7rem;
+    min-width: 6.8rem;
+    padding: 0.66rem 0.8rem 0.76rem;
+  }
+
+  .touch-button-label {
+    font-size: 0.76rem;
+  }
+
+  .touch-button-kicker,
+  .touch-button-meta {
+    font-size: 0.5rem;
   }
 
   .minimap-hint {
