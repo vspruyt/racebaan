@@ -51,6 +51,9 @@ let copyRoomResetTimer = null
 let identityMessageSource = 'neutral'
 let previousConnectionStatus = multiplayer.getState().connectionStatus
 let previousLapSubmissionResolvedAt = null
+let previousLocalPlayerBestLapMs = null
+let pendingGameLaunch = false
+let pendingGameLaunchMode = 'start'
 let roomSummary = {
   roomId: null,
   activePlayerCount: 0,
@@ -244,6 +247,15 @@ async function loadLeaderboards() {
 }
 
 function getPrimaryButtonLabel() {
+  const multiplayerState = multiplayer.getState()
+  if (pendingGameLaunch && multiplayerState.connectionStatus === 'connecting') {
+    return pendingGameLaunchMode === 'join' ? 'Joining Room...' : 'Creating Room...'
+  }
+
+  if (pendingGameLaunch && multiplayerState.connectionStatus === 'connected') {
+    return 'Opening Race...'
+  }
+
   if (roomSummary.loading) return 'Checking Room...'
 
   const currentRoomId = sanitizeRoomId(roomIdInputs[0]?.value ?? '')
@@ -257,9 +269,9 @@ function renderPrimaryButton() {
   if (!startButton) return
 
   startButton.textContent = getPrimaryButtonLabel()
-  if (roomSummary.loading) {
-    startButton.disabled = true
-  }
+  startButton.disabled =
+    roomSummary.loading ||
+    (pendingGameLaunch && multiplayer.getState().connectionStatus !== 'disconnected')
 }
 
 async function refreshRoomSummary(roomId) {
@@ -389,6 +401,8 @@ function disconnectFromRoom(reason = 'manual') {
 async function leaveRoomAndReturnHome() {
   const roomId = getCurrentRoomId()
   disconnectFromRoom('leave')
+  pendingGameLaunch = false
+  pendingGameLaunchMode = 'start'
   gameScreenShown = false
 
   if (gamePromise) {
@@ -471,6 +485,10 @@ function renderRoomStatus(state = multiplayer.getState()) {
     tone = lapSubmissionStatus.tone
   }
 
+  if (pendingGameLaunch && !gameScreenShown && !state.lastError) {
+    statusText = ''
+  }
+
   if (roomStatusMessage) {
     roomStatusMessage.textContent = statusText
     roomStatusMessage.dataset.tone = tone
@@ -501,12 +519,16 @@ function renderRoomStatus(state = multiplayer.getState()) {
     .map((player) => {
       const suffix = player.anonymousPlayerId === selfId ? ' (you)' : ''
       const metaParts = []
+      const displayRecordLapMs =
+        player.anonymousPlayerId === selfId
+          ? state.localPlayerAllTimeBestLapMs ?? player.allTimeBestLapMs ?? null
+          : player.allTimeBestLapMs ?? null
       if (player.finishPlace != null) {
         metaParts.push(`P${player.finishPlace}`)
       }
 
-      if (player.allTimeBestLapMs) {
-        metaParts.push(`record ${formatLapMs(player.allTimeBestLapMs)}`)
+      if (displayRecordLapMs) {
+        metaParts.push(`record ${formatLapMs(displayRecordLapMs)}`)
       } else if (player.bestLapMs) {
         metaParts.push(`best ${formatLapMs(player.bestLapMs)}`)
       }
@@ -528,7 +550,11 @@ async function handleStartRace() {
   const persistedIdentity = persistIdentityFromUi()
   if (!persistedIdentity) return
 
-  await ensureGame()
+  const isJoinFlow =
+    roomSummary.roomId === persistedIdentity.roomId && roomSummary.activePlayerCount > 0
+  pendingGameLaunch = true
+  pendingGameLaunchMode = isJoinFlow ? 'join' : 'start'
+  renderPrimaryButton()
   touchUserActivity()
   multiplayer.connect({
     roomId: persistedIdentity.roomId,
@@ -670,7 +696,16 @@ multiplayer.subscribe((state) => {
     state.connectionStatus === 'connected' &&
     previousConnectionStatus !== 'connected'
   ) {
-    setIdentityMessage(`Joined ${state.roomId}.`, 'success', 'joined')
+    if (!pendingGameLaunch) {
+      setIdentityMessage(`Joined ${state.roomId}.`, 'success', 'joined')
+    }
+    if (pendingGameLaunch && !gameScreenShown) {
+      void ensureGame().then(() => {
+        pendingGameLaunch = false
+        pendingGameLaunchMode = 'start'
+        renderPrimaryButton()
+      })
+    }
   } else if (
     state.connectionStatus === 'error' &&
     state.lastError &&
@@ -679,17 +714,49 @@ multiplayer.subscribe((state) => {
     setIdentityMessage(state.lastError, 'error', 'connection-error')
   }
 
+  if (state.connectionStatus === 'error') {
+    pendingGameLaunch = false
+    pendingGameLaunchMode = 'start'
+  }
+
   const lapSubmissionResolvedAt = state.lastLapSubmission?.resolvedAt ?? null
   if (
     state.lastLapSubmission?.status === 'accepted' &&
     lapSubmissionResolvedAt &&
     lapSubmissionResolvedAt !== previousLapSubmissionResolvedAt
   ) {
+    if (gamePromise) {
+      void gamePromise.then((game) => {
+        game.resolveLapSubmission(state.lastLapSubmission)
+      })
+    }
     void loadLeaderboards()
+  } else if (
+    state.lastLapSubmission?.status === 'rejected' &&
+    lapSubmissionResolvedAt &&
+    lapSubmissionResolvedAt !== previousLapSubmissionResolvedAt &&
+    gamePromise
+  ) {
+    void gamePromise.then((game) => {
+      game.resolveLapSubmission(state.lastLapSubmission)
+    })
+  }
+
+  const localPlayerBestLapMs =
+    Number.isFinite(state.localPlayerAllTimeBestLapMs) && state.localPlayerAllTimeBestLapMs > 0
+      ? state.localPlayerAllTimeBestLapMs
+      : null
+  if (localPlayerBestLapMs !== previousLocalPlayerBestLapMs && gamePromise) {
+    void gamePromise.then((game) => {
+      game.syncPersonalBestLapTime(
+        Number.isFinite(localPlayerBestLapMs) ? localPlayerBestLapMs / 1000 : null,
+      )
+    })
   }
 
   previousConnectionStatus = state.connectionStatus
   previousLapSubmissionResolvedAt = lapSubmissionResolvedAt
+  previousLocalPlayerBestLapMs = localPlayerBestLapMs
   renderRoomStatus(state)
   if (state.roomStatus === 'finished') {
     void loadLeaderboards()

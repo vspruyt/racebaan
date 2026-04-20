@@ -250,4 +250,37 @@ describe('createMultiplayerClient', () => {
     })
     expect(client.getState().lastError).toBe('Lap timing did not pass basic validation.')
   })
+
+  it('reports the player as ready after the local countdown ends', () => {
+    globalThis.window = {
+      clearInterval: vi.fn(),
+      setInterval: vi.fn(() => 1),
+    }
+    globalThis.WebSocket = MockWebSocket
+    globalThis.location = {
+      protocol: 'https:',
+      host: 'racebaan.test',
+    }
+
+    const client = createMultiplayerClient({
+      identityProvider: createIdentityProvider(),
+    })
+
+    client.connect({ roomId: 'room-test', trackId: DEFAULT_TRACK_ID })
+    const socket = MockWebSocket.instances[0]
+    socket.readyState = MockWebSocket.OPEN
+    socket.emit('open')
+    socket.emit('message', {
+      data: JSON.stringify({
+        type: 'joined',
+        roomId: 'room-test',
+        roomStatus: 'racing',
+        trackId: DEFAULT_TRACK_ID,
+      }),
+    })
+
+    client.reportPlayerReady()
+
+    expect(socket.sent).toContain(JSON.stringify({ type: 'player_ready' }))
+  })
 })

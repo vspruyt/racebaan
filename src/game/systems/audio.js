@@ -17,29 +17,6 @@ export function createAudioSystem({
   carState,
   getDriveInputState,
 }) {
-  function createNoiseBuffer(audioContext, duration = 2) {
-    const frameCount = Math.max(1, Math.floor(audioContext.sampleRate * duration))
-    const buffer = audioContext.createBuffer(1, frameCount, audioContext.sampleRate)
-    const channel = buffer.getChannelData(0)
-    let lastSample = 0
-
-    for (let index = 0; index < frameCount; index += 1) {
-      const whiteNoise = Math.random() * 2 - 1
-      lastSample = lastSample * 0.84 + whiteNoise * 0.16
-      channel[index] = lastSample
-    }
-
-    return buffer
-  }
-
-  function createLoopingNoiseSource(audioContext, buffer, playbackRate = 1) {
-    const source = audioContext.createBufferSource()
-    source.buffer = buffer
-    source.loop = true
-    source.playbackRate.value = playbackRate
-    return source
-  }
-
   function setAudioParam(audioParam, value, timeConstant = 0.05) {
     if (!audioState.context) return
 
@@ -118,7 +95,6 @@ export function createAudioSystem({
 
   function triggerGearShiftSound(direction, intensity) {
     if (!audioState.context || audioState.context.state !== 'running') return
-    if (!audioState.noiseBuffer) return
 
     const now = audioState.context.currentTime
     const clampedIntensity = THREE.MathUtils.clamp(intensity, 0, 1)
@@ -152,31 +128,11 @@ export function createAudioSystem({
     chirpFilter.frequency.setValueAtTime(direction > 0 ? 1100 : 820, now)
     chirpFilter.Q.value = 1.8 + clampedIntensity * 1.6
 
-    const hissSource = audioState.context.createBufferSource()
-    hissSource.buffer = audioState.noiseBuffer
-
-    const hissFilter = audioState.context.createBiquadFilter()
-    hissFilter.type = 'highpass'
-    hissFilter.frequency.setValueAtTime(direction > 0 ? 1800 : 1200, now)
-
-    const hissGain = audioState.context.createGain()
-    hissGain.gain.setValueAtTime(0.0001, now)
-    hissGain.gain.exponentialRampToValueAtTime(
-      0.006 + clampedIntensity * 0.018,
-      now + 0.01,
-    )
-    hissGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.14)
-
     chirpOscillator.connect(chirpFilter)
     chirpFilter.connect(shiftGain)
-    hissSource.connect(hissFilter)
-    hissFilter.connect(hissGain)
-    hissGain.connect(shiftGain)
 
     chirpOscillator.start(now)
     chirpOscillator.stop(now + 0.18)
-    hissSource.start(now)
-    hissSource.stop(now + 0.16)
   }
 
   function initializeDrivingAudio() {
@@ -225,62 +181,9 @@ export function createAudioSystem({
     engineLfoPrimaryGain.connect(enginePrimaryOscillator.detune)
     engineLfoSecondaryGain.connect(engineSecondaryOscillator.detune)
 
-    const noiseBuffer = createNoiseBuffer(audioContext)
-    audioState.noiseBuffer = noiseBuffer
-
-    const roadSource = createLoopingNoiseSource(audioContext, noiseBuffer, 0.86)
-    const roadHighpass = audioContext.createBiquadFilter()
-    roadHighpass.type = 'highpass'
-    roadHighpass.frequency.value = 55
-    const roadFilter = audioContext.createBiquadFilter()
-    roadFilter.type = 'lowpass'
-    roadFilter.frequency.value = 640
-    const roadGain = audioContext.createGain()
-    roadGain.gain.value = 0
-    roadSource.connect(roadHighpass)
-    roadHighpass.connect(roadFilter)
-    roadFilter.connect(roadGain)
-    roadGain.connect(masterGain)
-
-    const windSource = createLoopingNoiseSource(audioContext, noiseBuffer, 1.08)
-    const windFilter = audioContext.createBiquadFilter()
-    windFilter.type = 'highpass'
-    windFilter.frequency.value = 1800
-    const windGain = audioContext.createGain()
-    windGain.gain.value = 0
-    windSource.connect(windFilter)
-    windFilter.connect(windGain)
-    windGain.connect(masterGain)
-
-    const skidSource = createLoopingNoiseSource(audioContext, noiseBuffer, 1.42)
-    const skidFilter = audioContext.createBiquadFilter()
-    skidFilter.type = 'bandpass'
-    skidFilter.frequency.value = 1800
-    skidFilter.Q.value = 0.9
-    const skidGain = audioContext.createGain()
-    skidGain.gain.value = 0
-    skidSource.connect(skidFilter)
-    skidFilter.connect(skidGain)
-    skidGain.connect(masterGain)
-
-    const brakeSource = createLoopingNoiseSource(audioContext, noiseBuffer, 1.72)
-    const brakeFilter = audioContext.createBiquadFilter()
-    brakeFilter.type = 'bandpass'
-    brakeFilter.frequency.value = 2400
-    brakeFilter.Q.value = 1.1
-    const brakeGain = audioContext.createGain()
-    brakeGain.gain.value = 0
-    brakeSource.connect(brakeFilter)
-    brakeFilter.connect(brakeGain)
-    brakeGain.connect(masterGain)
-
     enginePrimaryOscillator.start()
     engineSecondaryOscillator.start()
     engineLfo.start()
-    roadSource.start()
-    windSource.start()
-    skidSource.start()
-    brakeSource.start()
 
     audioState.context = audioContext
     audioState.masterGain = masterGain
@@ -293,26 +196,6 @@ export function createAudioSystem({
       gain: engineGain,
       lfo: engineLfo,
     }
-    audioState.road = {
-      source: roadSource,
-      filter: roadFilter,
-      gain: roadGain,
-    }
-    audioState.wind = {
-      source: windSource,
-      filter: windFilter,
-      gain: windGain,
-    }
-    audioState.skid = {
-      source: skidSource,
-      filter: skidFilter,
-      gain: skidGain,
-    }
-    audioState.brake = {
-      source: brakeSource,
-      filter: brakeFilter,
-      gain: brakeGain,
-    }
   }
 
   function resumeDrivingAudio() {
@@ -323,6 +206,67 @@ export function createAudioSystem({
     if (audioState.context?.state === 'suspended') {
       audioState.context.resume().catch(() => {})
     }
+  }
+
+  function pauseDrivingAudio() {
+    if (!audioState.context || audioState.context.state !== 'running') return
+
+    audioState.context.suspend().catch(() => {})
+  }
+
+  function playCountdownTick(_countdownValue) {
+    if (!audioState.supported) return
+
+    initializeDrivingAudio()
+    if (!audioState.context || audioState.context.state !== 'running') return
+
+    const now = audioState.context.currentTime
+    const toneDuration = 0.18
+    const fundamentalFrequency = 246
+    const overtoneFrequency = fundamentalFrequency * 1.5
+
+    const toneGain = audioState.context.createGain()
+    toneGain.gain.setValueAtTime(0.0001, now)
+    toneGain.gain.exponentialRampToValueAtTime(
+      0.065,
+      now + 0.015,
+    )
+    toneGain.gain.exponentialRampToValueAtTime(0.0001, now + toneDuration)
+
+    const toneFilter = audioState.context.createBiquadFilter()
+    toneFilter.type = 'lowpass'
+    toneFilter.frequency.setValueAtTime(860, now)
+    toneFilter.Q.value = 0.6
+
+    const hornBody = audioState.context.createOscillator()
+    hornBody.type = 'sawtooth'
+    hornBody.frequency.setValueAtTime(fundamentalFrequency, now)
+    hornBody.frequency.linearRampToValueAtTime(
+      fundamentalFrequency * 0.97,
+      now + toneDuration,
+    )
+
+    const hornEdge = audioState.context.createOscillator()
+    hornEdge.type = 'square'
+    hornEdge.frequency.setValueAtTime(overtoneFrequency, now)
+    hornEdge.frequency.linearRampToValueAtTime(
+      overtoneFrequency * 0.985,
+      now + toneDuration,
+    )
+
+    const hornEdgeGain = audioState.context.createGain()
+    hornEdgeGain.gain.setValueAtTime(0.18, now)
+
+    hornBody.connect(toneFilter)
+    hornEdge.connect(hornEdgeGain)
+    hornEdgeGain.connect(toneFilter)
+    toneFilter.connect(toneGain)
+    toneGain.connect(audioState.masterGain)
+
+    hornBody.start(now)
+    hornEdge.start(now)
+    hornBody.stop(now + toneDuration + 0.02)
+    hornEdge.stop(now + toneDuration + 0.02)
   }
 
   function resetDrivingAudioState() {
@@ -340,7 +284,6 @@ export function createAudioSystem({
       ENGINE_CRUISE_SHIFT_MIN_DELAY,
       ENGINE_CRUISE_SHIFT_MAX_DELAY,
     )
-    audioState.guardrailContactActive = false
   }
 
   function updateDrivingAudio(delta, trackFrame) {
@@ -538,27 +481,6 @@ export function createAudioSystem({
       7.8,
       13.8,
     )
-    const roadVolume =
-      0.0015 + Math.pow(audioState.smoothedSpeed, 1.2) * 0.042
-    const windVolume =
-      Math.pow(audioState.smoothedSpeed, 1.7) * 0.032
-    const skidAmount =
-      Math.pow(audioState.smoothedCornerLoad, 1.4) *
-      THREE.MathUtils.smoothstep(audioState.smoothedSpeed, 0.18, 0.95)
-    const hardTurnAmount =
-      THREE.MathUtils.smoothstep(Math.abs(carState.steer), 0.34, 0.82) *
-      THREE.MathUtils.smoothstep(audioState.smoothedSpeed, 0.24, 0.9) *
-      THREE.MathUtils.smoothstep(trackFrame.turnStrength, 0.18, 0.78)
-    const tireScreechAmount = THREE.MathUtils.clamp(
-      skidAmount * 0.42 +
-        hardTurnAmount * (0.72 + audioState.smoothedThrottle * 0.18),
-      0,
-      1,
-    )
-    const brakeAmount =
-      audioState.smoothedBrake *
-      THREE.MathUtils.smoothstep(audioState.smoothedSpeed, 0.08, 0.9)
-
     setAudioParam(audioState.engine.primaryOscillator.frequency, engineBaseFrequency)
     setAudioParam(
       audioState.engine.secondaryOscillator.frequency,
@@ -569,48 +491,11 @@ export function createAudioSystem({
     setAudioParam(audioState.engine.filter.frequency, engineBrightness)
     setAudioParam(audioState.engine.gain.gain, engineVolume)
     setAudioParam(audioState.engine.lfo.frequency, engineLfoRate)
-
-    setAudioParam(
-      audioState.road.filter.frequency,
-      THREE.MathUtils.lerp(420, 820, audioState.smoothedSpeed),
-    )
-    setAudioParam(audioState.road.gain.gain, roadVolume)
-
-    setAudioParam(
-      audioState.wind.filter.frequency,
-      THREE.MathUtils.lerp(1700, 2800, audioState.smoothedSpeed),
-    )
-    setAudioParam(audioState.wind.gain.gain, windVolume)
-
-    setAudioParam(
-      audioState.skid.filter.frequency,
-      THREE.MathUtils.lerp(1550, 3250, tireScreechAmount),
-    )
-    setAudioParam(
-      audioState.skid.filter.Q,
-      THREE.MathUtils.lerp(0.9, 4.4, hardTurnAmount),
-    )
-    setAudioParam(
-      audioState.skid.source.playbackRate,
-      THREE.MathUtils.lerp(1.36, 2.28, tireScreechAmount),
-    )
-    setAudioParam(
-      audioState.skid.gain.gain,
-      tireScreechAmount *
-        (0.008 + hardTurnAmount * 0.12 + audioState.smoothedSpeed * 0.028),
-    )
-
-    setAudioParam(
-      audioState.brake.filter.frequency,
-      THREE.MathUtils.lerp(1900, 3000, brakeAmount),
-    )
-    setAudioParam(
-      audioState.brake.gain.gain,
-      brakeAmount * (0.018 + audioState.smoothedSpeed * 0.04),
-    )
   }
 
   return {
+    pauseDrivingAudio,
+    playCountdownTick,
     resetDrivingAudioState,
     resumeDrivingAudio,
     updateDrivingAudio,

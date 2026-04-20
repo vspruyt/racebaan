@@ -138,5 +138,9 @@ export const APP_TEMPLATE = `
       <div class="finish-notice" aria-live="assertive" aria-atomic="true">GAME OVER</div>
       <div class="finish-subtitle game-over-subtitle">Press R, Enter, or Space to respawn</div>
     </div>
+    <div class="race-countdown" aria-live="assertive" aria-atomic="true">
+      <div class="race-countdown-value">3</div>
+      <div class="race-countdown-label">Get Ready</div>
+    </div>
   </section>
 `

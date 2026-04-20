@@ -30,6 +30,10 @@ export function createInputSystem({
     })
   }
 
+  function isDriveInputBufferedState() {
+    return raceState.mode === 'racing' || raceState.mode === 'waiting'
+  }
+
   function resetTouchDriveState() {
     touchDriveState.active = false
     touchDriveState.pointerId = null
@@ -174,7 +178,7 @@ export function createInputSystem({
   function setTouchBoostMode(mode) {
     if (!prefersTouchControls) return
 
-    const nextMode = raceState.mode === 'racing' ? mode : 'none'
+    const nextMode = isDriveInputBufferedState() ? mode : 'none'
     touchActionState.boostMode = nextMode
     touchBoostButton?.classList.toggle('is-active', nextMode === 'boost')
     touchSuperBoostButton?.classList.toggle('is-active', nextMode === 'superboost')
@@ -260,7 +264,7 @@ export function createInputSystem({
 
     if (!(event.code in keyState)) return
 
-    if (raceState.mode !== 'racing') {
+    if (!isDriveInputBufferedState()) {
       keyState[event.code] = false
       event.preventDefault()
       return

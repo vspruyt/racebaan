@@ -250,6 +250,9 @@ const finishNotice = finishCelebration.querySelector('.finish-notice')
 const finishSubtitle = finishCelebration.querySelector('.finish-subtitle')
 const gameOverCelebration = app.querySelector('.finish-celebration--danger')
 const gameOverSubtitle = app.querySelector('.game-over-subtitle')
+const raceCountdown = app.querySelector('.race-countdown')
+const raceCountdownValue = raceCountdown?.querySelector('.race-countdown-value')
+const raceCountdownLabel = raceCountdown?.querySelector('.race-countdown-label')
 
 let renderer
 let scene
@@ -268,7 +271,12 @@ let remotePlayersGroup
 let lastMultiplayerRoomStatus = 'offline'
 let localPlayerStateAccumulator = 0
 let localRaceFinishedSent = false
+let localRaceCountdownEndsAtMs = 0
+let localRaceCountdownCurrentValue = null
+let gameScreenVisible = false
+let shouldReportPlayerReadyAfterCountdown = false
 const remotePlayerVisuals = new Map()
+const LOCAL_RACE_COUNTDOWN_SECONDS = 3
 const REMOTE_PLAYER_INTERPOLATION_DELAY_MS = 100
 const REMOTE_PLAYER_MAX_PREDICTION_SECONDS = 0.18
 const REMOTE_PLAYER_MAX_STALE_SECONDS = 0.45
@@ -315,8 +323,10 @@ const {
 } = createGameState({
   trackData: TRACK_DATA,
   trackMinimapBounds: TRACK_MINIMAP_BOUNDS,
+  // In multiplayer, prefer the server-backed personal best and do not
+  // silently fall back to browser-local history.
   initialBestLapTime:
-    initialBestLapTime ?? loadStoredBestLapTime(),
+    multiplayer ? initialBestLapTime : (initialBestLapTime ?? loadStoredBestLapTime()),
 })
 
 const lapSystem = createLapSystem({
@@ -665,18 +675,106 @@ function getMultiplayerRoomStatus() {
   return multiplayer?.getState().roomStatus ?? 'offline'
 }
 
+function clearLocalRaceCountdown() {
+  localRaceCountdownEndsAtMs = 0
+  localRaceCountdownCurrentValue = null
+  shouldReportPlayerReadyAfterCountdown = false
+  raceCountdown?.classList.remove('is-visible')
+}
+
+function startLocalRaceCountdown() {
+  const initialValue = LOCAL_RACE_COUNTDOWN_SECONDS
+  localRaceCountdownEndsAtMs = performance.now() + initialValue * 1000
+  localRaceCountdownCurrentValue = initialValue
+  shouldReportPlayerReadyAfterCountdown = Boolean(multiplayer)
+  if (raceCountdownValue) {
+    raceCountdownValue.textContent = String(initialValue)
+  }
+  if (raceCountdownLabel) {
+    raceCountdownLabel.textContent = 'Get Ready'
+  }
+  raceCountdown?.classList.add('is-visible')
+  audioSystem.playCountdownTick(initialValue)
+}
+
+function completeLocalRaceCountdown() {
+  const shouldReportPlayerReady = shouldReportPlayerReadyAfterCountdown
+  clearLocalRaceCountdown()
+  if (shouldReportPlayerReady) {
+    multiplayer?.reportPlayerReady()
+  }
+}
+
+function updateLocalRaceCountdownUi() {
+  if (!localRaceCountdownEndsAtMs) {
+    raceCountdown?.classList.remove('is-visible')
+    return false
+  }
+
+  const remainingMs = localRaceCountdownEndsAtMs - performance.now()
+  if (remainingMs <= 0) {
+    completeLocalRaceCountdown()
+    return false
+  }
+
+  const nextValue = Math.max(1, Math.ceil(remainingMs / 1000))
+  if (nextValue !== localRaceCountdownCurrentValue) {
+    localRaceCountdownCurrentValue = nextValue
+    if (raceCountdownValue) {
+      raceCountdownValue.textContent = String(nextValue)
+    }
+    audioSystem.playCountdownTick(nextValue)
+  }
+
+  raceCountdown?.classList.add('is-visible')
+  return true
+}
+
+function applyLocalRaceCountdownGate() {
+  raceState.mode = 'waiting'
+  physicsState.frozen = true
+  localPlayerStateAccumulator = 0
+  localRaceFinishedSent = false
+}
+
+function applyHiddenGameGate() {
+  clearLocalRaceCountdown()
+  raceState.mode = 'home'
+  physicsState.frozen = true
+  localPlayerStateAccumulator = 0
+  localRaceFinishedSent = false
+}
+
 function syncMultiplayerRoomStatus(force = false) {
   if (!renderer || !scene) return
 
+  if (!gameScreenVisible) {
+    applyHiddenGameGate()
+    return
+  }
+
+  if (!multiplayer) {
+    if (updateLocalRaceCountdownUi()) {
+      applyLocalRaceCountdownGate()
+      return
+    }
+    raceState.mode = 'racing'
+    physicsState.frozen = false
+    return
+  }
+
   const roomStatus = getMultiplayerRoomStatus()
-  if (!force && roomStatus === lastMultiplayerRoomStatus) {
+  const waitingForLocalRaceCountdown =
+    roomStatus === 'racing' && raceState.mode !== 'racing'
+  if (!force && roomStatus === lastMultiplayerRoomStatus && !waitingForLocalRaceCountdown) {
     return
   }
 
   const previousStatus = lastMultiplayerRoomStatus
   lastMultiplayerRoomStatus = roomStatus
 
-  if (roomStatus === 'lobby' || roomStatus === 'countdown') {
+  if (roomStatus === 'lobby') {
+    clearLocalRaceCountdown()
     resetRaceSession()
     raceState.mode = 'waiting'
     physicsState.frozen = true
@@ -685,9 +783,27 @@ function syncMultiplayerRoomStatus(force = false) {
     return
   }
 
-  if (roomStatus === 'racing') {
-    if (previousStatus !== 'racing') {
+  if (roomStatus === 'countdown') {
+    if (previousStatus !== 'countdown' || force) {
       resetRaceSession()
+      if (gameScreenVisible) {
+        startLocalRaceCountdown()
+      }
+    }
+    applyLocalRaceCountdownGate()
+    return
+  }
+
+  if (roomStatus === 'racing') {
+    if (previousStatus !== 'racing' || force) {
+      resetRaceSession()
+      if (gameScreenVisible && (force || previousStatus !== 'countdown')) {
+        startLocalRaceCountdown()
+      }
+    }
+    if (updateLocalRaceCountdownUi()) {
+      applyLocalRaceCountdownGate()
+      return
     }
     raceState.mode = 'racing'
     physicsState.frozen = false
@@ -698,6 +814,7 @@ function syncMultiplayerRoomStatus(force = false) {
   }
 
   if (roomStatus === 'finished') {
+    clearLocalRaceCountdown()
     raceState.mode = 'waiting'
     physicsState.frozen = true
     return
@@ -707,17 +824,23 @@ function syncMultiplayerRoomStatus(force = false) {
     resetRaceSession()
   }
 
-  raceState.mode = 'racing'
-  physicsState.frozen = false
+  clearLocalRaceCountdown()
+  raceState.mode = 'waiting'
+  physicsState.frozen = true
+  localPlayerStateAccumulator = 0
+  localRaceFinishedSent = false
 }
 
 function handleLapCompleted() {
-  const lapResult = lapSystem.completeCurrentLap()
+  const lapResult = lapSystem.completeCurrentLap({
+    awaitServerConfirmation: Boolean(multiplayer),
+  })
 
   if (multiplayer && lapResult.lapNumber) {
     multiplayer.reportLapCompleted({
       lapNumber: lapResult.lapNumber,
       lapMs: Math.round(lapResult.lapSeconds * 1000),
+      bestLapMs: lapResult.isNewRecord ? Math.round(lapResult.lapSeconds * 1000) : null,
     })
 
     if (lapResult.lapNumber >= RACE_LAPS && !localRaceFinishedSent) {
@@ -1882,6 +2005,7 @@ function updateCar(delta) {
 }
 
 function updateRenderState(delta, alpha = 1) {
+  updateLocalRaceCountdownUi()
   raceState.finishTimer = Math.max(raceState.finishTimer - delta, 0)
   const finishVisible = raceState.finishTimer > 0
   finishCelebration.classList.toggle('is-visible', finishVisible)
@@ -1964,7 +2088,9 @@ function updateRenderState(delta, alpha = 1) {
     carFillLight.intensity = THREE.MathUtils.lerp(14, 18, fastMotionRatio)
   }
 
-  audioSystem.updateDrivingAudio(delta, trackFrame)
+  if (gameScreenVisible) {
+    audioSystem.updateDrivingAudio(delta, trackFrame)
+  }
 }
 
 function getOrbitCameraTarget() {
@@ -2420,6 +2546,7 @@ async function createGameScene() {
 async function showGameScreen() {
   homeScreen.classList.add('hidden')
   gameScreen.classList.remove('hidden')
+  gameScreenVisible = true
   audioSystem.resumeDrivingAudio()
 
   if (!renderer) {
@@ -2432,7 +2559,18 @@ async function showGameScreen() {
 }
 
 function showHomeScreen() {
+  gameScreenVisible = false
+  clearLocalRaceCountdown()
   resetRaceSession()
+  inputSystem.clearDriveKeys()
+  inputSystem.resetTouchDriveState()
+  inputSystem.resetTouchActionState()
+  raceState.mode = 'home'
+  physicsState.frozen = true
+  localPlayerStateAccumulator = 0
+  localRaceFinishedSent = false
+  audioSystem.resetDrivingAudioState()
+  audioSystem.pauseDrivingAudio()
   homeScreen.classList.remove('hidden')
   gameScreen.classList.add('hidden')
 }
@@ -2552,6 +2690,10 @@ function onWindowResize() {
 
 function respawnAtTrackStart() {
   resetRaceSession()
+  if (gameScreenVisible) {
+    startLocalRaceCountdown()
+    applyLocalRaceCountdownGate()
+  }
   renderer?.domElement.focus()
   audioSystem.resumeDrivingAudio()
 }
@@ -2627,5 +2769,23 @@ window.addEventListener('keyup', (event) => inputSystem.setDriveKey(event, false
   return {
     showGameScreen,
     showHomeScreen,
+    resolveLapSubmission(result) {
+      if (!result?.lapNumber) return
+
+      if (result.status === 'accepted') {
+        lapSystem.confirmLapTime(
+          result.lapNumber,
+          Number.isFinite(result.officialLapMs) ? result.officialLapMs / 1000 : null,
+        )
+        return
+      }
+
+      if (result.status === 'rejected') {
+        lapSystem.rejectLapTime(result.lapNumber)
+      }
+    },
+    syncPersonalBestLapTime(bestLapTime) {
+      lapSystem.syncBestLapTime(bestLapTime, { persist: true })
+    },
   }
 }

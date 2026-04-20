@@ -5,6 +5,8 @@ import {
 } from '../constants.js'
 import { formatLapTime } from '../lib/utils.js'
 
+const UNCONFIRMED_LAP_TIME = '--:--.---'
+
 function shouldUseCompactLapTimerLayout() {
   return typeof window !== 'undefined' && window.matchMedia('(max-width: 640px)').matches
 }
@@ -77,6 +79,8 @@ export function createLapSystem({ raceState, lapTimers }) {
       elapsed: 0,
       completed: false,
       isRecord: false,
+      awaitingServer: false,
+      serverRejected: false,
       node: card,
       statusNode: status,
       valueNode: value,
@@ -144,6 +148,22 @@ export function createLapSystem({ raceState, lapTimers }) {
     return true
   }
 
+  function syncBestLapTime(bestLapTime, { persist = true } = {}) {
+    if (!Number.isFinite(bestLapTime) || bestLapTime <= 0) {
+      raceState.bestLapTime = null
+      syncStoredRecordLapTimerEntry()
+      refreshLapTimerRecordState()
+      return
+    }
+
+    raceState.bestLapTime = bestLapTime
+    if (persist) {
+      storeBestLapTime(bestLapTime)
+    }
+    syncStoredRecordLapTimerEntry()
+    refreshLapTimerRecordState()
+  }
+
   function isLapEntryMirroredByStoredRecord(entry) {
     return (
       entry.completed &&
@@ -153,12 +173,19 @@ export function createLapSystem({ raceState, lapTimers }) {
   }
 
   function syncLapTimerEntry(entry) {
-    entry.statusNode.textContent = entry.isRecord
-      ? 'Record'
-      : entry.completed
-        ? 'Finished'
-        : 'Current'
-    entry.valueNode.textContent = formatLapTime(entry.elapsed)
+    entry.statusNode.textContent = entry.awaitingServer
+      ? 'Saving'
+      : entry.serverRejected
+        ? 'Failed'
+        : entry.isRecord
+          ? 'Record'
+          : entry.completed
+            ? 'Saved'
+            : 'Current'
+    entry.valueNode.textContent =
+      entry.awaitingServer || entry.serverRejected
+        ? UNCONFIRMED_LAP_TIME
+        : formatLapTime(entry.elapsed)
     entry.node.classList.toggle('is-active', !entry.completed)
     entry.node.classList.toggle('is-complete', entry.completed)
     entry.node.classList.toggle('is-record', entry.isRecord)
@@ -260,7 +287,7 @@ export function createLapSystem({ raceState, lapTimers }) {
     appendLapTimerEntry()
   }
 
-  function completeCurrentLap() {
+  function completeCurrentLap({ awaitServerConfirmation = false } = {}) {
     const currentLapEntry = getCurrentLapEntry()
 
     if (!currentLapEntry) {
@@ -272,6 +299,9 @@ export function createLapSystem({ raceState, lapTimers }) {
       currentLapEntry.elapsed < raceState.bestLapTime - LAP_RECORD_MATCH_EPSILON
 
     currentLapEntry.completed = true
+    currentLapEntry.awaitingServer = awaitServerConfirmation
+    currentLapEntry.serverRejected = false
+    syncLapTimerEntry(currentLapEntry)
 
     if (isNewRecord) {
       setBestLapTime(currentLapEntry.elapsed)
@@ -307,10 +337,40 @@ export function createLapSystem({ raceState, lapTimers }) {
     return getCurrentLapEntry()?.lapNumber ?? raceState.nextLapNumber
   }
 
+  function findLapEntry(lapNumber) {
+    return raceState.laps.find((entry) => entry.lapNumber === lapNumber) ?? null
+  }
+
+  function confirmLapTime(lapNumber, elapsedSeconds) {
+    const entry = findLapEntry(lapNumber)
+    if (!entry || !entry.completed) return
+
+    if (Number.isFinite(elapsedSeconds) && elapsedSeconds > 0) {
+      entry.elapsed = elapsedSeconds
+    }
+    entry.awaitingServer = false
+    entry.serverRejected = false
+    syncLapTimerEntry(entry)
+    refreshLapTimerRecordState()
+  }
+
+  function rejectLapTime(lapNumber) {
+    const entry = findLapEntry(lapNumber)
+    if (!entry || !entry.completed) return
+
+    entry.awaitingServer = false
+    entry.serverRejected = true
+    syncLapTimerEntry(entry)
+    refreshLapTimerRecordState()
+  }
+
   return {
     advanceLapTimer,
+    confirmLapTime,
     completeCurrentLap,
     getCurrentLapNumber,
+    rejectLapTime,
     resetLapTimers,
+    syncBestLapTime,
   }
 }

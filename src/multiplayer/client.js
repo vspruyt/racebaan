@@ -3,7 +3,11 @@ import {
   PING_INTERVAL_MS,
   RACE_LAPS,
   buildSocketUrl,
+  createUuid,
 } from '../../shared/multiplayer.js'
+
+const LAP_SUBMISSION_RETRY_MS = 1500
+const MAX_LAP_SUBMISSION_ATTEMPTS = 4
 
 function createInitialState() {
   return {
@@ -17,6 +21,7 @@ function createInitialState() {
     raceStartedAt: null,
     connectedPlayers: [],
     remotePlayers: new Map(),
+    localPlayerAllTimeBestLapMs: null,
     pendingLapSubmission: null,
     lastLapSubmission: null,
     lastError: null,
@@ -27,6 +32,7 @@ export function createMultiplayerClient({ identityProvider }) {
   const listeners = new Set()
   let socket = null
   let pingTimer = null
+  let lapSubmissionRetryTimer = null
   let state = createInitialState()
 
   function emit() {
@@ -51,7 +57,15 @@ export function createMultiplayerClient({ identityProvider }) {
     }
   }
 
+  function clearLapSubmissionRetryTimer() {
+    if (lapSubmissionRetryTimer) {
+      globalThis.clearTimeout(lapSubmissionRetryTimer)
+      lapSubmissionRetryTimer = null
+    }
+  }
+
   function resetConnectionState() {
+    clearLapSubmissionRetryTimer()
     state = {
       ...createInitialState(),
       trackId: state.trackId,
@@ -72,9 +86,13 @@ export function createMultiplayerClient({ identityProvider }) {
   function createLapSubmissionResult(status, details = {}) {
     return {
       status,
+      clientLapId: details.clientLapId ?? null,
       lapNumber: details.lapNumber ?? null,
       lapMs: details.lapMs ?? null,
       officialLapMs: details.officialLapMs ?? null,
+      bestLapMs: details.bestLapMs ?? null,
+      attempts: details.attempts ?? 0,
+      optimisticBestLapMs: details.optimisticBestLapMs ?? null,
       message: details.message ?? '',
       resolvedAt: details.resolvedAt ?? Date.now(),
     }
@@ -89,9 +107,101 @@ export function createMultiplayerClient({ identityProvider }) {
     ].includes(code)
   }
 
+  function getConnectedPlayer(players, anonymousPlayerId) {
+    return players.find((player) => player.anonymousPlayerId === anonymousPlayerId) ?? null
+  }
+
+  function getServerBackedPersonalBest(players = state.connectedPlayers) {
+    const identity = identityProvider()
+    const localPlayer = getConnectedPlayer(players, identity.anonymousPlayerId)
+    return Number.isFinite(localPlayer?.allTimeBestLapMs) && localPlayer.allTimeBestLapMs > 0
+      ? localPlayer.allTimeBestLapMs
+      : null
+  }
+
+  function getEffectiveLocalPlayerBestLapMs(serverBestLapMs, pendingLapSubmission = state.pendingLapSubmission) {
+    const optimisticBestLapMs = pendingLapSubmission?.optimisticBestLapMs
+    if (
+      Number.isFinite(optimisticBestLapMs) &&
+      optimisticBestLapMs > 0 &&
+      (!Number.isFinite(serverBestLapMs) || optimisticBestLapMs < serverBestLapMs)
+    ) {
+      return optimisticBestLapMs
+    }
+
+    return serverBestLapMs
+  }
+
+  function finalizeLapSubmission(status, details = {}) {
+    clearLapSubmissionRetryTimer()
+
+    const fallbackPersonalBest = getServerBackedPersonalBest()
+    const nextBestLapMs =
+      Number.isFinite(details.bestLapMs) && details.bestLapMs > 0
+        ? details.bestLapMs
+        : fallbackPersonalBest
+
+    setState({
+      pendingLapSubmission: null,
+      localPlayerAllTimeBestLapMs: nextBestLapMs,
+      lastLapSubmission: createLapSubmissionResult(status, details),
+      lastError: status === 'rejected'
+        ? details.message ?? 'Lap time was not accepted by the server.'
+        : null,
+    })
+  }
+
+  function scheduleLapSubmissionRetry(clientLapId) {
+    clearLapSubmissionRetryTimer()
+    lapSubmissionRetryTimer = globalThis.setTimeout(() => {
+      sendPendingLapSubmission(clientLapId)
+    }, LAP_SUBMISSION_RETRY_MS)
+  }
+
+  function sendPendingLapSubmission(expectedClientLapId) {
+    const pendingLapSubmission = state.pendingLapSubmission
+    if (!pendingLapSubmission || pendingLapSubmission.clientLapId !== expectedClientLapId) {
+      return
+    }
+
+    if (pendingLapSubmission.attempts >= MAX_LAP_SUBMISSION_ATTEMPTS) {
+      finalizeLapSubmission('rejected', {
+        clientLapId: pendingLapSubmission.clientLapId,
+        lapNumber: pendingLapSubmission.lapNumber,
+        lapMs: pendingLapSubmission.lapMs,
+        attempts: pendingLapSubmission.attempts,
+        optimisticBestLapMs: pendingLapSubmission.optimisticBestLapMs,
+        message: 'Could not confirm lap save after multiple attempts.',
+      })
+      return
+    }
+
+    const sent = sendMessage({
+      type: 'lap_completed',
+      clientLapId: pendingLapSubmission.clientLapId,
+      lapNumber: pendingLapSubmission.lapNumber,
+      lapMs: pendingLapSubmission.lapMs,
+    })
+
+    if (!sent) {
+      scheduleLapSubmissionRetry(expectedClientLapId)
+      return
+    }
+
+    setState({
+      pendingLapSubmission: {
+        ...pendingLapSubmission,
+        attempts: pendingLapSubmission.attempts + 1,
+        lastAttemptAt: Date.now(),
+      },
+    })
+    scheduleLapSubmissionRetry(expectedClientLapId)
+  }
+
   function handleServerMessage(message) {
     switch (message.type) {
       case 'joined':
+        clearLapSubmissionRetryTimer()
         setState({
           connectionStatus: 'connected',
           roomStatus: message.roomStatus ?? 'lobby',
@@ -99,6 +209,7 @@ export function createMultiplayerClient({ identityProvider }) {
           trackId: message.trackId ?? DEFAULT_TRACK_ID,
           raceLaps: message.raceLaps ?? RACE_LAPS,
           countdownMs: message.countdownMs ?? null,
+          localPlayerAllTimeBestLapMs: null,
           pendingLapSubmission: null,
           lastLapSubmission: null,
           lastError: null,
@@ -130,14 +241,17 @@ export function createMultiplayerClient({ identityProvider }) {
             })
           }
 
+        const serverBestLapMs = getServerBackedPersonalBest(players)
         setState({
           roomStatus: message.roomStatus ?? state.roomStatus,
           connectedPlayers: players,
+          localPlayerAllTimeBestLapMs: getEffectiveLocalPlayerBestLapMs(serverBestLapMs),
           remotePlayers,
         })
         break
         }
       case 'countdown_started':
+        clearLapSubmissionRetryTimer()
         setState({
           roomStatus: 'countdown',
           countdownStartedAt:
@@ -148,11 +262,19 @@ export function createMultiplayerClient({ identityProvider }) {
         })
         break
       case 'race_started':
+        clearLapSubmissionRetryTimer()
         setState({
           roomStatus: 'racing',
           raceStartedAt: message.startedAt ?? Date.now(),
           pendingLapSubmission: null,
           lastLapSubmission: null,
+        })
+        break
+      case 'player_ready':
+        setState({
+          roomStatus: 'racing',
+          raceStartedAt: message.startedAt ?? Date.now(),
+          lastError: null,
         })
         break
       case 'state_snapshot': {
@@ -200,14 +322,13 @@ export function createMultiplayerClient({ identityProvider }) {
         break
       case 'error':
         if (isLapSubmissionError(message.code) && state.pendingLapSubmission) {
-          setState({
-            pendingLapSubmission: null,
-            lastLapSubmission: createLapSubmissionResult('rejected', {
-              lapNumber: state.pendingLapSubmission.lapNumber,
-              lapMs: state.pendingLapSubmission.lapMs,
-              message: message.message ?? 'Lap time was not accepted by the server.',
-            }),
-            lastError: message.message ?? 'Unknown websocket error.',
+          finalizeLapSubmission('rejected', {
+            clientLapId: state.pendingLapSubmission.clientLapId,
+            lapNumber: state.pendingLapSubmission.lapNumber,
+            lapMs: state.pendingLapSubmission.lapMs,
+            attempts: state.pendingLapSubmission.attempts,
+            optimisticBestLapMs: state.pendingLapSubmission.optimisticBestLapMs,
+            message: message.message ?? 'Lap time was not accepted by the server.',
           })
           break
         }
@@ -227,15 +348,15 @@ export function createMultiplayerClient({ identityProvider }) {
           break
         }
 
-        setState({
-          pendingLapSubmission: null,
-          lastLapSubmission: createLapSubmissionResult('accepted', {
-            lapNumber: message.lapNumber ?? state.pendingLapSubmission?.lapNumber,
-            lapMs: state.pendingLapSubmission?.lapMs ?? null,
-            officialLapMs: message.lapMs ?? null,
-            message: 'Lap time saved to the leaderboard.',
-          }),
-          lastError: null,
+        finalizeLapSubmission('accepted', {
+          clientLapId: message.clientLapId ?? state.pendingLapSubmission?.clientLapId,
+          lapNumber: message.lapNumber ?? state.pendingLapSubmission?.lapNumber,
+          lapMs: state.pendingLapSubmission?.lapMs ?? null,
+          officialLapMs: message.lapMs ?? null,
+          bestLapMs: message.bestLapMs ?? state.localPlayerAllTimeBestLapMs,
+          attempts: state.pendingLapSubmission?.attempts ?? 0,
+          optimisticBestLapMs: state.pendingLapSubmission?.optimisticBestLapMs ?? null,
+          message: 'Lap time saved to the leaderboard.',
         })
         break
       }
@@ -296,6 +417,7 @@ export function createMultiplayerClient({ identityProvider }) {
       if (!isActiveSocket(nextSocket)) return
 
       clearPingTimer()
+      clearLapSubmissionRetryTimer()
       socket = null
       const lastError =
         state.connectionStatus === 'error' ? state.lastError : null
@@ -322,6 +444,7 @@ export function createMultiplayerClient({ identityProvider }) {
 
   function disconnect() {
     clearPingTimer()
+    clearLapSubmissionRetryTimer()
     if (socket) {
       socket.close(1000, 'Client disconnected')
       socket = null
@@ -354,39 +477,44 @@ export function createMultiplayerClient({ identityProvider }) {
   }
 
   function reportLapCompleted(lapEvent) {
-    const sent = sendMessage({
-      type: 'lap_completed',
-      ...lapEvent,
-    })
-
-    if (sent) {
-      setState({
-        pendingLapSubmission: {
-          lapNumber: lapEvent.lapNumber ?? null,
-          lapMs: lapEvent.lapMs ?? null,
-          submittedAt: Date.now(),
-        },
-        lastLapSubmission: null,
-        lastError: null,
-      })
-      return
-    }
+    const clientLapId = createUuid()
+    const optimisticBestLapMs =
+      Number.isFinite(lapEvent.bestLapMs) && lapEvent.bestLapMs > 0
+        ? lapEvent.bestLapMs
+        : null
 
     setState({
-      pendingLapSubmission: null,
-      lastLapSubmission: createLapSubmissionResult('rejected', {
+      pendingLapSubmission: {
+        clientLapId,
         lapNumber: lapEvent.lapNumber ?? null,
         lapMs: lapEvent.lapMs ?? null,
-        message: 'Could not submit lap time because the room connection was not ready.',
-      }),
-      lastError: 'Could not submit lap time because the room connection was not ready.',
+        optimisticBestLapMs,
+        attempts: 0,
+        submittedAt: Date.now(),
+        lastAttemptAt: null,
+      },
+      localPlayerAllTimeBestLapMs: getEffectiveLocalPlayerBestLapMs(
+        getServerBackedPersonalBest(),
+        {
+          optimisticBestLapMs,
+        },
+      ),
+      lastLapSubmission: null,
+      lastError: null,
     })
+    sendPendingLapSubmission(clientLapId)
   }
 
   function reportRaceFinished(raceEvent) {
     sendMessage({
       type: 'race_finished',
       ...raceEvent,
+    })
+  }
+
+  function reportPlayerReady() {
+    sendMessage({
+      type: 'player_ready',
     })
   }
 
@@ -404,6 +532,7 @@ export function createMultiplayerClient({ identityProvider }) {
       ...state,
       remotePlayers: new Map(state.remotePlayers),
       connectedPlayers: [...state.connectedPlayers],
+      localPlayerAllTimeBestLapMs: state.localPlayerAllTimeBestLapMs,
       pendingLapSubmission: state.pendingLapSubmission
         ? { ...state.pendingLapSubmission }
         : null,
@@ -422,6 +551,7 @@ export function createMultiplayerClient({ identityProvider }) {
     getState,
     refreshIdentity,
     reportLapCompleted,
+    reportPlayerReady,
     reportRaceFinished,
     sendPlayerState,
     subscribe,

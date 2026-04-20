@@ -12,6 +12,6 @@ export default defineConfig({
     },
   },
   test: {
-    include: ['src/**/*.test.js'],
+    include: ['src/**/*.test.js', 'worker/**/*.test.js'],
   },
 })
