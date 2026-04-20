@@ -8,14 +8,26 @@ import { errorJson, json } from './lib/http.js'
 import {
   getLeaderboardQueryParams,
   queryLeaderboard,
-  queryRecentLaps,
+  queryPersonalBest,
 } from './lib/leaderboard.js'
 
-async function handleLeaderboardRequest(request, env, url) {
+async function handleLeaderboardRequest(env, url) {
   const params = getLeaderboardQueryParams(url)
   const kind = url.pathname.split('/').at(-1)
 
-  if (!['weekly', 'all-time', 'recent'].includes(kind)) {
+  if (kind === 'personal') {
+    const result = await queryPersonalBest(env, params)
+
+    return json({
+      ok: true,
+      period: kind,
+      trackId: params.trackId,
+      anonymousPlayerId: params.anonymousPlayerId,
+      result,
+    })
+  }
+
+  if (kind !== 'all-time') {
     return errorJson(404, 'not_found', 'Unknown leaderboard endpoint.')
   }
 
@@ -23,10 +35,7 @@ async function handleLeaderboardRequest(request, env, url) {
     return errorJson(400, 'invalid_track_id', 'Track ID was invalid.')
   }
 
-  const rows =
-    kind === 'recent'
-      ? await queryRecentLaps(env, params)
-      : await queryLeaderboard(env, kind, params)
+  const rows = await queryLeaderboard(env, params)
 
   return json({
     ok: true,
@@ -35,6 +44,19 @@ async function handleLeaderboardRequest(request, env, url) {
     limit: params.limit,
     results: rows,
   })
+}
+
+async function handleRoomSummaryRequest(env, url) {
+  const roomId = sanitizeRoomId(url.pathname.split('/').at(-1) ?? '')
+  if (!roomId) {
+    return errorJson(400, 'invalid_room_id', 'Room ID must use lowercase letters, numbers, or dashes.')
+  }
+
+  const stub = env.RACE_ROOM.get(env.RACE_ROOM.idFromName(roomId))
+  const forwardUrl = new URL(url)
+  forwardUrl.pathname = `/room/${roomId}/summary`
+
+  return stub.fetch(new Request(forwardUrl, { method: 'GET' }))
 }
 
 async function handleRoomSocket(request, env, url) {
@@ -68,7 +90,11 @@ export default {
     }
 
     if (url.pathname.startsWith('/api/leaderboard/')) {
-      return handleLeaderboardRequest(request, env, url)
+      return handleLeaderboardRequest(env, url)
+    }
+
+    if (url.pathname.startsWith('/api/room/')) {
+      return handleRoomSummaryRequest(env, url)
     }
 
     if (url.pathname.startsWith('/ws/room/')) {

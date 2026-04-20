@@ -1,6 +1,10 @@
 import * as THREE from 'three'
 import RAPIER from '@dimforge/rapier3d-compat'
 
+import {
+  PLAYER_STATE_SEND_INTERVAL_MS,
+  RACE_LAPS,
+} from '../../shared/multiplayer.js'
 import * as C from './constants.js'
 import { WHEEL_VISUAL_LAYOUT, createGameState } from './state.js'
 import {
@@ -28,7 +32,10 @@ import {
   getTrackBounds2D as getTrackBounds2DFromData,
 } from './systems/track.js'
 
-export function createGame({ app }) {
+export function createGame({ app, multiplayer = null, initialBestLapTime = null }) {
+const CAMERA_DRAG_ACTIVATION_DISTANCE = 6
+const CAMERA_DRAG_ACTIVATION_DISTANCE_SQUARED =
+  CAMERA_DRAG_ACTIVATION_DISTANCE * CAMERA_DRAG_ACTIVATION_DISTANCE
 const {
   AudioContextClass,
   DAY_SKY_COLOR,
@@ -150,8 +157,14 @@ const {
   TOUCH_DRIVE_BRAKE_INTENT_THRESHOLD,
   TOUCH_DRIVE_REVERSE_SPEED_THRESHOLD,
   CRASH_GAME_OVER_DELAY,
+  CRASH_STUCK_GAME_OVER_DELAY,
   CRASH_OUT_OF_TRACK_MARGIN,
   CRASH_BELOW_TRACK_MARGIN,
+  CRASH_STUCK_TILT_DOT_THRESHOLD,
+  CRASH_STUCK_FORWARD_SPEED_THRESHOLD,
+  CRASH_STUCK_TRACK_SPEED_THRESHOLD,
+  CRASH_STUCK_MIN_RIDE_HEIGHT,
+  CRASH_STUCK_MAX_WHEEL_CONTACTS,
   WORLD_UP,
   PHYSICS_GRAVITY,
   PHYSICS_ENGINE_FORCE,
@@ -251,6 +264,16 @@ let frontRightWheelGroup
 let rearLeftWheelGroup
 let rearRightWheelGroup
 let steeringWheelGroup
+let remotePlayersGroup
+let lastMultiplayerRoomStatus = 'offline'
+let localPlayerStateAccumulator = 0
+let localRaceFinishedSent = false
+const remotePlayerVisuals = new Map()
+const REMOTE_PLAYER_INTERPOLATION_DELAY_MS = 100
+const REMOTE_PLAYER_MAX_PREDICTION_SECONDS = 0.18
+const REMOTE_PLAYER_MAX_STALE_SECONDS = 0.45
+const REMOTE_PLAYER_POSITION_SMOOTHING = 12
+const REMOTE_PLAYER_ROTATION_SMOOTHING = 10
 const TRACK_DATA = createTrackData()
 const TRACK_JUMP = TRACK_DATA.jumpFeature
 const TRACK_MINIMAP_BOUNDS = getTrackBounds2DFromData(TRACK_DATA)
@@ -292,7 +315,8 @@ const {
 } = createGameState({
   trackData: TRACK_DATA,
   trackMinimapBounds: TRACK_MINIMAP_BOUNDS,
-  initialBestLapTime: loadStoredBestLapTime(),
+  initialBestLapTime:
+    initialBestLapTime ?? loadStoredBestLapTime(),
 })
 
 const lapSystem = createLapSystem({
@@ -330,7 +354,7 @@ const trackSystem = createTrackSystem({
   minimapContext,
   minimapState,
   onFinishLineCrossed: () =>
-    effectsSystem.triggerFinishCelebration(lapSystem.completeCurrentLap),
+    effectsSystem.triggerFinishCelebration(handleLapCompleted),
 })
 let audioSystem
 const inputSystem = createInputSystem({
@@ -397,6 +421,399 @@ function quaternionToRapier(quaternion) {
     y: quaternion.y,
     z: quaternion.z,
     w: quaternion.w,
+  }
+}
+
+function roundSnapshotValue(value) {
+  return Math.round(value * 1000) / 1000
+}
+
+function createRemotePlayerNameTag() {
+  const canvas = document.createElement('canvas')
+  canvas.width = 220
+  canvas.height = 92
+
+  const context = canvas.getContext('2d')
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.SRGBColorSpace
+  texture.generateMipmaps = false
+  texture.minFilter = THREE.LinearFilter
+  texture.magFilter = THREE.LinearFilter
+
+  const material = new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthTest: false,
+  })
+  const sprite = new THREE.Sprite(material)
+  sprite.position.set(0, 1.02, 0)
+  sprite.scale.set(1.18, 0.5, 1)
+  sprite.renderOrder = 10
+
+  return {
+    canvas,
+    context,
+    texture,
+    material,
+    sprite,
+    text: '',
+  }
+}
+
+function updateRemotePlayerNameTag(nameTag, displayName, allTimeBestLapMs = null) {
+  const label = typeof displayName === 'string' ? displayName.trim() : ''
+  const recordLabel =
+    Number.isFinite(allTimeBestLapMs) && allTimeBestLapMs > 0
+      ? formatLapTime(allTimeBestLapMs / 1000)
+      : ''
+  const combinedText = `${label}\n${recordLabel}`
+  if (!nameTag.context || combinedText === nameTag.text) {
+    return
+  }
+
+  nameTag.text = combinedText
+
+  const { canvas, context, texture, sprite } = nameTag
+  context.clearRect(0, 0, canvas.width, canvas.height)
+
+  if (!label) {
+    texture.needsUpdate = true
+    sprite.visible = false
+    return
+  }
+
+  sprite.visible = true
+
+  const pillX = 20
+  const pillY = 14
+  const pillWidth = canvas.width - pillX * 2
+  const pillHeight = canvas.height - pillY * 2
+  const radius = pillHeight / 2
+
+  context.fillStyle = 'rgba(15, 23, 42, 0.88)'
+  context.beginPath()
+  context.moveTo(pillX + radius, pillY)
+  context.lineTo(pillX + pillWidth - radius, pillY)
+  context.quadraticCurveTo(pillX + pillWidth, pillY, pillX + pillWidth, pillY + radius)
+  context.lineTo(pillX + pillWidth, pillY + pillHeight - radius)
+  context.quadraticCurveTo(
+    pillX + pillWidth,
+    pillY + pillHeight,
+    pillX + pillWidth - radius,
+    pillY + pillHeight,
+  )
+  context.lineTo(pillX + radius, pillY + pillHeight)
+  context.quadraticCurveTo(pillX, pillY + pillHeight, pillX, pillY + pillHeight - radius)
+  context.lineTo(pillX, pillY + radius)
+  context.quadraticCurveTo(pillX, pillY, pillX + radius, pillY)
+  context.closePath()
+  context.fill()
+
+  context.lineWidth = 2
+  context.strokeStyle = 'rgba(255, 255, 255, 0.18)'
+  context.stroke()
+
+  context.fillStyle = '#f8fafc'
+  context.font = '600 24px Arial'
+  context.textAlign = 'center'
+  context.textBaseline = 'middle'
+  context.fillText(label, canvas.width / 2, recordLabel ? 33 : canvas.height / 2 + 1)
+
+  if (recordLabel) {
+    context.fillStyle = 'rgba(226, 232, 240, 0.92)'
+    context.font = '500 16px Arial'
+    context.fillText(recordLabel, canvas.width / 2, 62)
+  }
+
+  texture.needsUpdate = true
+}
+
+function disposeRemotePlayerVisual(visual) {
+  visual.group.remove(visual.nameTag.sprite)
+  visual.nameTag.texture.dispose()
+  visual.nameTag.material.dispose()
+}
+
+function createRemotePlayerVisual(anonymousPlayerId) {
+  const hueSeed = anonymousPlayerId
+    .split('')
+    .reduce((total, character) => total + character.charCodeAt(0), 0)
+  const bodyColor = new THREE.Color().setHSL((hueSeed % 360) / 360, 0.68, 0.55)
+  const accentColor = bodyColor.clone().offsetHSL(0.08, 0.02, 0.08)
+  const group = new THREE.Group()
+  const nameTag = createRemotePlayerNameTag()
+
+  const body = new THREE.Mesh(
+    new THREE.BoxGeometry(0.72, 0.22, 1.28),
+    new THREE.MeshStandardMaterial({
+      color: bodyColor,
+      metalness: 0.18,
+      roughness: 0.42,
+    }),
+  )
+  body.position.y = 0.28
+
+  const canopy = new THREE.Mesh(
+    new THREE.BoxGeometry(0.46, 0.18, 0.52),
+    new THREE.MeshStandardMaterial({
+      color: accentColor,
+      metalness: 0.12,
+      roughness: 0.36,
+      emissive: accentColor.clone().multiplyScalar(0.08),
+    }),
+  )
+  canopy.position.set(0, 0.47, -0.02)
+
+  group.add(body, canopy, nameTag.sprite)
+
+  return {
+    group,
+    nameTag,
+    hasInitialTransform: false,
+    lastSnapshotTimestamp: null,
+    snapshots: [],
+    interpolationStartPosition: new THREE.Vector3(),
+    interpolationEndPosition: new THREE.Vector3(),
+    interpolationStartQuaternion: new THREE.Quaternion(),
+    interpolationEndQuaternion: new THREE.Quaternion(),
+    targetPosition: new THREE.Vector3(),
+    targetQuaternion: new THREE.Quaternion(),
+  }
+}
+
+function queueRemotePlayerSnapshot(visual, player) {
+  const timestamp = typeof player.timestamp === 'number' ? player.timestamp : player.receivedAt
+  if (timestamp === visual.lastSnapshotTimestamp) {
+    return
+  }
+
+  visual.lastSnapshotTimestamp = timestamp
+  visual.snapshots.push({
+    receivedAt: typeof player.receivedAt === 'number' ? player.receivedAt : Date.now(),
+    position: [...player.position],
+    quaternion: [...player.quaternion],
+    velocity: Array.isArray(player.velocity) ? [...player.velocity] : null,
+  })
+
+  while (visual.snapshots.length > 4) {
+    visual.snapshots.shift()
+  }
+}
+
+function setRemotePlayerTargetTransform(visual) {
+  if (!visual.snapshots.length) {
+    return false
+  }
+
+  const renderTime = Date.now() - REMOTE_PLAYER_INTERPOLATION_DELAY_MS
+  while (
+    visual.snapshots.length >= 3 &&
+    visual.snapshots[1].receivedAt <= renderTime
+  ) {
+    visual.snapshots.shift()
+  }
+
+  if (visual.snapshots.length >= 2) {
+    const start = visual.snapshots[0]
+    const end = visual.snapshots[1]
+    const durationMs = end.receivedAt - start.receivedAt
+
+    if (durationMs > 0 && renderTime <= end.receivedAt) {
+      const alpha = THREE.MathUtils.clamp(
+        (renderTime - start.receivedAt) / durationMs,
+        0,
+        1,
+      )
+
+      visual.interpolationStartPosition.fromArray(start.position)
+      visual.interpolationEndPosition.fromArray(end.position)
+      visual.targetPosition.lerpVectors(
+        visual.interpolationStartPosition,
+        visual.interpolationEndPosition,
+        alpha,
+      )
+
+      visual.interpolationStartQuaternion.fromArray(start.quaternion)
+      visual.interpolationEndQuaternion.fromArray(end.quaternion)
+      visual.targetQuaternion.slerpQuaternions(
+        visual.interpolationStartQuaternion,
+        visual.interpolationEndQuaternion,
+        alpha,
+      )
+
+      return true
+    }
+  }
+
+  const latestSnapshot = visual.snapshots[visual.snapshots.length - 1]
+  const staleSeconds = Math.max(0, (Date.now() - latestSnapshot.receivedAt) / 1000)
+  visual.targetPosition.fromArray(latestSnapshot.position)
+  visual.targetQuaternion.fromArray(latestSnapshot.quaternion)
+
+  if (!latestSnapshot.velocity || staleSeconds > REMOTE_PLAYER_MAX_STALE_SECONDS) {
+    return true
+  }
+
+  const predictionSeconds = Math.min(staleSeconds, REMOTE_PLAYER_MAX_PREDICTION_SECONDS)
+  visual.targetPosition.x += latestSnapshot.velocity[0] * predictionSeconds
+  visual.targetPosition.y += latestSnapshot.velocity[1] * predictionSeconds
+  visual.targetPosition.z += latestSnapshot.velocity[2] * predictionSeconds
+  return true
+}
+
+function getMultiplayerRoomStatus() {
+  return multiplayer?.getState().roomStatus ?? 'offline'
+}
+
+function syncMultiplayerRoomStatus(force = false) {
+  if (!renderer || !scene) return
+
+  const roomStatus = getMultiplayerRoomStatus()
+  if (!force && roomStatus === lastMultiplayerRoomStatus) {
+    return
+  }
+
+  const previousStatus = lastMultiplayerRoomStatus
+  lastMultiplayerRoomStatus = roomStatus
+
+  if (roomStatus === 'lobby' || roomStatus === 'countdown') {
+    resetRaceSession()
+    raceState.mode = 'waiting'
+    physicsState.frozen = true
+    localPlayerStateAccumulator = 0
+    localRaceFinishedSent = false
+    return
+  }
+
+  if (roomStatus === 'racing') {
+    if (previousStatus !== 'racing') {
+      resetRaceSession()
+    }
+    raceState.mode = 'racing'
+    physicsState.frozen = false
+    physicsState.accumulator = 0
+    localPlayerStateAccumulator = 0
+    localRaceFinishedSent = false
+    return
+  }
+
+  if (roomStatus === 'finished') {
+    raceState.mode = 'waiting'
+    physicsState.frozen = true
+    return
+  }
+
+  if (previousStatus === 'lobby' || previousStatus === 'countdown' || previousStatus === 'racing') {
+    resetRaceSession()
+  }
+
+  raceState.mode = 'racing'
+  physicsState.frozen = false
+}
+
+function handleLapCompleted() {
+  const lapResult = lapSystem.completeCurrentLap()
+
+  if (multiplayer && lapResult.lapNumber) {
+    multiplayer.reportLapCompleted({
+      lapNumber: lapResult.lapNumber,
+      lapMs: Math.round(lapResult.lapSeconds * 1000),
+    })
+
+    if (lapResult.lapNumber >= RACE_LAPS && !localRaceFinishedSent) {
+      localRaceFinishedSent = true
+      multiplayer.reportRaceFinished({
+        raceMs: Math.round(lapResult.raceSeconds * 1000),
+      })
+    }
+  }
+
+  return lapResult
+}
+
+function sendLocalPlayerStateIfNeeded(frameDelta) {
+  if (!multiplayer || getMultiplayerRoomStatus() !== 'racing' || raceState.mode !== 'racing') {
+    return
+  }
+
+  localPlayerStateAccumulator += frameDelta
+  const sendIntervalSeconds = PLAYER_STATE_SEND_INTERVAL_MS / 1000
+  if (localPlayerStateAccumulator < sendIntervalSeconds) {
+    return
+  }
+  localPlayerStateAccumulator -= sendIntervalSeconds
+
+  const trackFrame = trackSystem.getTrackFrame(carState.position, carState.trackSampleIndex)
+  const linearVelocity = physicsState.chassisBody?.linvel?.() ?? { x: 0, y: 0, z: 0 }
+
+  multiplayer.sendPlayerState({
+    timestamp: Date.now(),
+    position: [
+      roundSnapshotValue(carState.position.x),
+      roundSnapshotValue(carState.position.y),
+      roundSnapshotValue(carState.position.z),
+    ],
+    quaternion: [
+      roundSnapshotValue(renderState.quaternion.x),
+      roundSnapshotValue(renderState.quaternion.y),
+      roundSnapshotValue(renderState.quaternion.z),
+      roundSnapshotValue(renderState.quaternion.w),
+    ],
+    velocity: [
+      roundSnapshotValue(linearVelocity.x),
+      roundSnapshotValue(linearVelocity.y),
+      roundSnapshotValue(linearVelocity.z),
+    ],
+    lap: Math.min(lapSystem.getCurrentLapNumber(), RACE_LAPS),
+    progress: roundSnapshotValue(trackFrame.distance / TRACK_DATA.totalDistance),
+  })
+}
+
+function syncRemotePlayerVisuals(delta) {
+  if (!multiplayer || !remotePlayersGroup) return
+
+  const activeRemoteIds = new Set()
+  for (const player of multiplayer.getRemotePlayers()) {
+    activeRemoteIds.add(player.anonymousPlayerId)
+    let visual = remotePlayerVisuals.get(player.anonymousPlayerId)
+
+    if (!visual) {
+      visual = createRemotePlayerVisual(player.anonymousPlayerId)
+      remotePlayerVisuals.set(player.anonymousPlayerId, visual)
+      remotePlayersGroup.add(visual.group)
+    }
+
+    updateRemotePlayerNameTag(
+      visual.nameTag,
+      player.displayName,
+      player.allTimeBestLapMs,
+    )
+    queueRemotePlayerSnapshot(visual, player)
+    const hasTargetTransform = setRemotePlayerTargetTransform(visual)
+    if (!hasTargetTransform) continue
+
+    if (!visual.hasInitialTransform) {
+      visual.group.position.copy(visual.targetPosition)
+      visual.group.quaternion.copy(visual.targetQuaternion)
+      visual.hasInitialTransform = true
+      continue
+    }
+
+    visual.group.position.lerp(
+      visual.targetPosition,
+      1 - Math.exp(-REMOTE_PLAYER_POSITION_SMOOTHING * delta),
+    )
+    visual.group.quaternion.slerp(
+      visual.targetQuaternion,
+      1 - Math.exp(-REMOTE_PLAYER_ROTATION_SMOOTHING * delta),
+    )
+  }
+
+  for (const [anonymousPlayerId, visual] of remotePlayerVisuals.entries()) {
+    if (activeRemoteIds.has(anonymousPlayerId)) continue
+    remotePlayersGroup.remove(visual.group)
+    disposeRemotePlayerVisual(visual)
+    remotePlayerVisuals.delete(anonymousPlayerId)
   }
 }
 
@@ -1052,14 +1469,15 @@ function clampVehicleSpeed() {
   )
 }
 
-function updatePhysicsGameOver(trackFrame, delta) {
+function updatePhysicsGameOver(trackFrame, delta, driveIntent) {
   const surfaceHeight = trackFrame.surfacePoint.y + PHYSICS_BODY_RIDE_HEIGHT
   const jumpGrace = trackSystem.isTrackFrameInJumpZone(trackFrame)
     ? TRACK_JUMP_GAME_OVER_GRACE
     : 0
-  const upDot = new THREE.Vector3(0, 1, 0)
-    .applyQuaternion(renderState.quaternion)
-    .dot(WORLD_UP)
+  const chassisQuaternion = physicsState.currentQuaternion
+  const chassisUp = new THREE.Vector3(0, 1, 0).applyQuaternion(chassisQuaternion)
+  const trackUp = getTrackSurfaceUp(trackFrame)
+  const upDot = chassisUp.dot(WORLD_UP)
   const upsideDown =
     upDot < -0.35 &&
     carState.position.y <= surfaceHeight + 0.16
@@ -1070,6 +1488,24 @@ function updatePhysicsGameOver(trackFrame, delta) {
     Math.abs(trackFrame.lateralOffset) >
       GUARDRAIL_OFFSET + GUARDRAIL_THICKNESS + CRASH_OUT_OF_TRACK_MARGIN ||
     belowTrack
+  const linearVelocity = physicsState.chassisBody?.linvel() ?? { x: 0, y: 0, z: 0 }
+  const trackTravelSpeed =
+    linearVelocity.x * trackFrame.flatTangent.x +
+    linearVelocity.z * trackFrame.flatTangent.z
+  const nearGuardrail =
+    Math.abs(trackFrame.lateralOffset) > GUARDRAIL_OFFSET - 0.18
+  const wheelContactCount = getWheelContactCount()
+  const tilted = chassisUp.dot(trackUp) < CRASH_STUCK_TILT_DOT_THRESHOLD
+  const elevatedAboveTrack =
+    carState.position.y > surfaceHeight + CRASH_STUCK_MIN_RIDE_HEIGHT
+  const strandedOnRail =
+    elevatedAboveTrack || wheelContactCount <= CRASH_STUCK_MAX_WHEEL_CONTACTS
+  const stuckOnGuardrail =
+    driveIntent !== 0 &&
+    nearGuardrail &&
+    (tilted || strandedOnRail) &&
+    Math.abs(carState.speed) <= CRASH_STUCK_FORWARD_SPEED_THRESHOLD &&
+    Math.abs(trackTravelSpeed) <= CRASH_STUCK_TRACK_SPEED_THRESHOLD
 
   physicsState.upsideDownTime = upsideDown
     ? physicsState.upsideDownTime + delta
@@ -1077,11 +1513,16 @@ function updatePhysicsGameOver(trackFrame, delta) {
   physicsState.offTrackTime = outOfTrack
     ? physicsState.offTrackTime + delta
     : 0
+  physicsState.stuckTime = stuckOnGuardrail
+    ? physicsState.stuckTime + delta
+    : 0
 
   if (physicsState.offTrackTime >= CRASH_GAME_OVER_DELAY) {
     triggerGameOver('offTrack')
   } else if (physicsState.upsideDownTime >= CRASH_GAME_OVER_DELAY) {
     triggerGameOver('upsideDown')
+  } else if (physicsState.stuckTime >= CRASH_STUCK_GAME_OVER_DELAY) {
+    triggerGameOver('stuck')
   }
 }
 
@@ -1270,6 +1711,8 @@ function triggerGameOver(reason = 'wrecked') {
   gameOverSubtitle.textContent =
     reason === 'upsideDown'
       ? `Upside down. ${inputSystem.getRespawnPrompt()}`
+      : reason === 'stuck'
+        ? `Stuck on guardrail. ${inputSystem.getRespawnPrompt()}`
       : reason === 'offTrack'
         ? inputSystem.getRespawnPrompt()
         : inputSystem.getRespawnPrompt()
@@ -1288,6 +1731,7 @@ function updateCar(delta) {
   const trackFrame = trackSystem.getTrackFrame(carState.position, carState.trackSampleIndex)
   carState.trackSampleIndex = trackFrame.sampleIndex
   const sideContainmentDisabled = shouldDisableSideContainment(trackFrame)
+  let driveIntent = 0
 
   if (!physicsState.frozen) {
     const driveInput = inputSystem.getDriveInputState()
@@ -1297,7 +1741,7 @@ function updateCar(delta) {
     const steeringInput = driveInput.steer
     const nearGuardrail =
       Math.abs(trackFrame.lateralOffset) > GUARDRAIL_OFFSET - 0.24
-    const driveIntent =
+    driveIntent =
       accelerating && !reversing
         ? 1
         : reversing && !accelerating
@@ -1433,7 +1877,7 @@ function updateCar(delta) {
 
   if (raceState.mode === 'racing') {
     trackSystem.updateFinishState(previousPosition, carState.position, carState.trackSampleIndex)
-    updatePhysicsGameOver(updatedTrackFrame, delta)
+    updatePhysicsGameOver(updatedTrackFrame, delta, driveIntent)
   }
 }
 
@@ -1527,11 +1971,22 @@ function getOrbitCameraTarget() {
   return renderState.position.clone().add(new THREE.Vector3(0, ORBIT_CAMERA_TARGET_HEIGHT, 0))
 }
 
+function shouldRecoverDrivingCamera() {
+  if (raceState.mode !== 'racing') return false
+
+  const driveInput = inputSystem.getDriveInputState()
+  return driveInput.accelerate > 0.001 || driveInput.reverse > 0.001
+}
+
 function updateCamera(delta) {
   const target = renderState.position.clone().add(new THREE.Vector3(0, 0.24, 0))
   const speedVisualTarget =
     raceState.mode === 'racing' ? getFastMotionRatio(carState.speed) : 0
   cameraState.speedVisual = damp(cameraState.speedVisual, speedVisualTarget, 4.5, delta)
+
+  if (cameraState.mode === 'orbit' && !cameraState.dragging && shouldRecoverDrivingCamera()) {
+    cameraState.mode = cameraState.driveMode
+  }
 
   if (cameraState.mode === 'orbit') {
     const orbitTarget = getOrbitCameraTarget()
@@ -1643,20 +2098,57 @@ function syncOrbitCameraFromCurrentView() {
   cameraState.orbitYaw = spherical.theta
 }
 
+function releaseCameraPointerCapture(pointerId = cameraState.pointerId) {
+  if (
+    pointerId == null ||
+    !renderer?.domElement.hasPointerCapture?.(pointerId)
+  ) {
+    return
+  }
+
+  renderer.domElement.releasePointerCapture(pointerId)
+}
+
 function onCameraPointerDown(event) {
   if (!renderer || inputSystem.isTouchDrivePointer(event)) return
 
-  cameraState.mode = 'orbit'
   cameraState.dragging = true
+  cameraState.orbitPending = true
+  cameraState.pointerId = event.pointerId
   cameraState.pointerX = event.clientX
   cameraState.pointerY = event.clientY
-  syncOrbitCameraFromCurrentView()
+  cameraState.dragStartX = event.clientX
+  cameraState.dragStartY = event.clientY
+  renderer.domElement.setPointerCapture?.(event.pointerId)
   renderer.domElement.focus()
   event.preventDefault()
 }
 
 function onCameraPointerMove(event) {
-  if (!cameraState.dragging || inputSystem.isTouchDrivePointer(event)) return
+  if (
+    !cameraState.dragging ||
+    inputSystem.isTouchDrivePointer(event) ||
+    event.pointerId !== cameraState.pointerId
+  ) {
+    return
+  }
+
+  if (cameraState.orbitPending) {
+    const dragDistanceSquared =
+      (event.clientX - cameraState.dragStartX) ** 2 +
+      (event.clientY - cameraState.dragStartY) ** 2
+
+    if (dragDistanceSquared < CAMERA_DRAG_ACTIVATION_DISTANCE_SQUARED) {
+      return
+    }
+
+    cameraState.mode = 'orbit'
+    cameraState.orbitPending = false
+    syncOrbitCameraFromCurrentView()
+    cameraState.pointerX = event.clientX
+    cameraState.pointerY = event.clientY
+    return
+  }
 
   const deltaX = event.clientX - cameraState.pointerX
   const deltaY = event.clientY - cameraState.pointerY
@@ -1673,11 +2165,31 @@ function onCameraPointerMove(event) {
 
 function onCameraPointerUp(event) {
   if (event && inputSystem.isTouchDrivePointer(event)) return
-  cameraState.dragging = false
+  if (
+    event &&
+    cameraState.pointerId != null &&
+    event.pointerId !== cameraState.pointerId
+  ) {
+    return
+  }
 
-  if (inputSystem.hasDriveInput() || Math.abs(carState.speed) > 0.15) {
+  releaseCameraPointerCapture(event?.pointerId)
+  cameraState.dragging = false
+  cameraState.orbitPending = false
+  cameraState.pointerId = null
+
+  if (shouldRecoverDrivingCamera()) {
     cameraState.mode = cameraState.driveMode
   }
+}
+
+function onCameraLostPointerCapture(event) {
+  if (event.pointerId !== cameraState.pointerId) return
+  onCameraPointerUp(event)
+}
+
+function onWindowBlur() {
+  onCameraPointerUp()
 }
 
 function onCameraWheel(event) {
@@ -1746,10 +2258,12 @@ async function createGameScene() {
     event.preventDefault()
   })
   renderer.domElement.addEventListener('pointerdown', onPointerDown)
+  renderer.domElement.addEventListener('lostpointercapture', onCameraLostPointerCapture)
   renderer.domElement.addEventListener('wheel', onCameraWheel, { passive: false })
   window.addEventListener('pointermove', onPointerMove)
   window.addEventListener('pointerup', onPointerUp)
   window.addEventListener('pointercancel', onPointerUp)
+  window.addEventListener('blur', onWindowBlur)
   trackSystem.resizeMinimapCanvas()
 
   addDayEnvironment({
@@ -1837,6 +2351,8 @@ async function createGameScene() {
 
   const finishLineGroup = trackSystem.createFinishLineGroup()
   scene.add(finishLineGroup)
+  remotePlayersGroup = new THREE.Group()
+  scene.add(remotePlayersGroup)
 
   carShadow = new THREE.Mesh(
     new THREE.CircleGeometry(0.42, 40),
@@ -1876,6 +2392,7 @@ async function createGameScene() {
   clock.start()
   renderer.setAnimationLoop(() => {
     const frameDelta = Math.min(clock.getDelta(), 0.05)
+    syncMultiplayerRoomStatus()
     physicsState.accumulator = Math.min(
       physicsState.accumulator + frameDelta,
       PHYSICS_STEP * 3,
@@ -1892,6 +2409,8 @@ async function createGameScene() {
       frameDelta,
       THREE.MathUtils.clamp(physicsState.accumulator / PHYSICS_STEP, 0, 1),
     )
+    syncRemotePlayerVisuals(frameDelta)
+    sendLocalPlayerStateIfNeeded(frameDelta)
     updateCamera(frameDelta)
 
     renderer.render(scene, camera)
@@ -1907,8 +2426,15 @@ async function showGameScreen() {
     await createGameScene()
   }
 
+  syncMultiplayerRoomStatus(true)
   renderer.domElement.focus()
   onWindowResize()
+}
+
+function showHomeScreen() {
+  resetRaceSession()
+  homeScreen.classList.remove('hidden')
+  gameScreen.classList.add('hidden')
 }
 
 function resetRaceSession() {
@@ -1926,6 +2452,7 @@ function resetRaceSession() {
   physicsState.frozen = false
   physicsState.upsideDownTime = 0
   physicsState.offTrackTime = 0
+  physicsState.stuckTime = 0
   physicsState.engineForce = 0
   physicsState.accumulator = 0
   physicsState.brakeHoldActive = false
@@ -1966,6 +2493,9 @@ function resetRaceSession() {
 
   cameraState.mode = 'follow'
   cameraState.driveMode = 'follow'
+  cameraState.dragging = false
+  cameraState.orbitPending = false
+  cameraState.pointerId = null
   cameraState.followDistance = FOLLOW_CAMERA_DISTANCE_DEFAULT
   cameraState.speedVisual = 0
 
@@ -2006,6 +2536,8 @@ function resetRaceSession() {
   speedometerValue.textContent = '0'
   updateWheelVisuals(0)
   if (steeringWheelGroup) steeringWheelGroup.rotation.z = 0
+  localPlayerStateAccumulator = 0
+  localRaceFinishedSent = false
 }
 
 function onWindowResize() {
@@ -2094,5 +2626,6 @@ window.addEventListener('keyup', (event) => inputSystem.setDriveKey(event, false
 
   return {
     showGameScreen,
+    showHomeScreen,
   }
 }

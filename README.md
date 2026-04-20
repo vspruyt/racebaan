@@ -28,11 +28,21 @@ Preview the full Worker app locally, including static assets, API routes, Durabl
 pnpm worker:dev
 ```
 
+Expose the Worker preview to other devices on your local network:
+
+```bash
+pnpm worker:dev:lan
+```
+
+Wrangler uses `--ip 0.0.0.0` for LAN binding. Its `--host` flag means "forward requests to another host", so `pnpm worker:dev --host` will not do the same thing as Vite's `pnpm dev --host`.
+
+`pnpm worker:dev` and `pnpm worker:dev:lan` rebuild the frontend before starting Wrangler so the Worker-served `dist/` assets stay in sync with recent UI changes.
+
 Local URLs to check:
 
 - `http://127.0.0.1:8787/`
 - `http://127.0.0.1:8787/api/health`
-- `http://127.0.0.1:8787/api/leaderboard/weekly?trackId=default&limit=10`
+- `http://127.0.0.1:8787/api/leaderboard/all-time?trackId=default&limit=10`
 
 ## Multiplayer deployment on Cloudflare
 
@@ -147,9 +157,9 @@ That gives you Git-based deploys fully inside Cloudflare, while still applying D
 1. Open the site and confirm the game still loads.
 2. Open `/api/health` and confirm JSON returns.
 3. Open two browser tabs with different room participants.
-4. Connect both tabs to the same room.
+4. Enter the same room ID in both tabs and start the race.
 5. Confirm the countdown starts, both players appear in the room list, and placeholder remote cars move.
-6. Finish laps and confirm the weekly/all-time leaderboards update.
+6. Finish laps and confirm the all-time leaderboard updates.
 
 ## v1 choices and limitations
 

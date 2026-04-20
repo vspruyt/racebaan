@@ -1,4 +1,5 @@
 import {
+  createUuid,
   createRandomRoomId,
   isAnonymousPlayerId,
   sanitizeDisplayName,
@@ -8,6 +9,7 @@ import {
 const PLAYER_ID_STORAGE_KEY = 'racebaan-anonymous-player-id'
 const DISPLAY_NAME_STORAGE_KEY = 'racebaan-display-name'
 const ROOM_ID_STORAGE_KEY = 'racebaan-room-id'
+const ROOM_URL_QUERY_PARAM = 'room'
 
 export function getOrCreateAnonymousPlayerId() {
   const existing = window.localStorage.getItem(PLAYER_ID_STORAGE_KEY)
@@ -15,7 +17,7 @@ export function getOrCreateAnonymousPlayerId() {
     return existing
   }
 
-  const anonymousPlayerId = crypto.randomUUID()
+  const anonymousPlayerId = createUuid()
   window.localStorage.setItem(PLAYER_ID_STORAGE_KEY, anonymousPlayerId)
   return anonymousPlayerId
 }
@@ -46,10 +48,22 @@ export function saveRoomId(roomId) {
   return sanitized
 }
 
-export function generateAndStoreRoomId() {
-  const roomId = createRandomRoomId()
-  window.localStorage.setItem(ROOM_ID_STORAGE_KEY, roomId)
-  return roomId
+export function getSharedRoomIdFromUrl(locationLike = globalThis.location) {
+  const href = locationLike?.href
+  if (typeof href !== 'string' || !href) return null
+
+  const roomId = new URL(href).searchParams.get(ROOM_URL_QUERY_PARAM)
+  return sanitizeRoomId(roomId)
+}
+
+export function buildRoomShareUrl(roomId, locationLike = globalThis.location) {
+  const sanitizedRoomId = sanitizeRoomId(roomId)
+  const href = locationLike?.href
+  if (!sanitizedRoomId || typeof href !== 'string' || !href) return null
+
+  const url = new URL(href)
+  url.searchParams.set(ROOM_URL_QUERY_PARAM, sanitizedRoomId)
+  return url.toString()
 }
 
 export function getIdentitySnapshot() {

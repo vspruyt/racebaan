@@ -5,6 +5,10 @@ import {
 } from '../constants.js'
 import { formatLapTime } from '../lib/utils.js'
 
+function shouldUseCompactLapTimerLayout() {
+  return typeof window !== 'undefined' && window.matchMedia('(max-width: 640px)').matches
+}
+
 export function loadStoredBestLapTime() {
   if (typeof window === 'undefined' || !window.localStorage) {
     return null
@@ -25,6 +29,12 @@ export function loadStoredBestLapTime() {
 }
 
 export function createLapSystem({ raceState, lapTimers }) {
+  if (typeof window !== 'undefined') {
+    window.addEventListener('resize', () => {
+      renderLapTimerList()
+    })
+  }
+
   function storeBestLapTime(bestLapTime) {
     if (typeof window === 'undefined' || !window.localStorage) {
       return
@@ -162,7 +172,11 @@ export function createLapSystem({ raceState, lapTimers }) {
       nodes.push(storedRecordLapTimerEntry.node)
     }
 
-    for (const entry of raceState.laps) {
+    const visibleLapEntries = shouldUseCompactLapTimerLayout()
+      ? raceState.laps.filter((entry) => !entry.isRecord).slice(-2)
+      : raceState.laps.filter((entry) => !entry.isRecord)
+
+    for (const entry of visibleLapEntries) {
       if (!entry.isRecord) {
         nodes.push(entry.node)
       }
@@ -250,7 +264,7 @@ export function createLapSystem({ raceState, lapTimers }) {
     const currentLapEntry = getCurrentLapEntry()
 
     if (!currentLapEntry) {
-      return { isNewRecord: false }
+      return { isNewRecord: false, lapNumber: null, lapSeconds: null, raceSeconds: null }
     }
 
     const isNewRecord =
@@ -265,7 +279,17 @@ export function createLapSystem({ raceState, lapTimers }) {
 
     appendLapTimerEntry()
 
-    return { isNewRecord }
+    const raceSeconds = raceState.laps.reduce(
+      (total, entry) => total + (entry.completed ? entry.elapsed : 0),
+      0,
+    )
+
+    return {
+      isNewRecord,
+      lapNumber: currentLapEntry.lapNumber,
+      lapSeconds: currentLapEntry.elapsed,
+      raceSeconds,
+    }
   }
 
   function advanceLapTimer(delta) {
@@ -279,9 +303,14 @@ export function createLapSystem({ raceState, lapTimers }) {
     syncLapTimerEntry(currentLapEntry)
   }
 
+  function getCurrentLapNumber() {
+    return getCurrentLapEntry()?.lapNumber ?? raceState.nextLapNumber
+  }
+
   return {
     advanceLapTimer,
     completeCurrentLap,
+    getCurrentLapNumber,
     resetLapTimers,
   }
 }

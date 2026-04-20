@@ -21,8 +21,8 @@
     {
       "binding": "DB",
       "database_name": "racebaan-db",
-      "database_id": "00000000-0000-0000-0000-000000000000",
-      "preview_database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "8005aa1d-ad42-44db-a173-f7b597907da2",
+      "preview_database_id": "8005aa1d-ad42-44db-a173-f7b597907da2",
       "migrations_dir": "migrations"
     }
   ],

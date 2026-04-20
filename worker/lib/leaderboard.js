@@ -1,53 +1,51 @@
 import {
   DEFAULT_TRACK_ID,
   clampLeaderboardLimit,
+  isAnonymousPlayerId,
   sanitizeTrackId,
 } from '../../shared/multiplayer.js'
 
 const LEADERBOARD_SELECT = `
-  WITH best_per_player AS (
-    SELECT
-      anonymous_player_id,
-      MIN(lap_ms) AS best_lap_ms
-    FROM lap_times
-    WHERE track_id = ?1
-      AND (?2 IS NULL OR finished_at >= ?2)
-    GROUP BY anonymous_player_id
-  ),
-  latest_names AS (
+  WITH ranked_laps AS (
     SELECT
       anonymous_player_id,
       display_name,
-      MAX(finished_at) AS latest_seen_at
+      room_id,
+      lap_ms,
+      finished_at,
+      ROW_NUMBER() OVER (
+        PARTITION BY anonymous_player_id
+        ORDER BY lap_ms ASC, finished_at DESC
+      ) AS row_number
     FROM lap_times
     WHERE track_id = ?1
-    GROUP BY anonymous_player_id
   )
-  SELECT
-    best_per_player.anonymous_player_id,
-    latest_names.display_name,
-    best_per_player.best_lap_ms,
-    ?1 AS track_id,
-    latest_names.latest_seen_at
-  FROM best_per_player
-  INNER JOIN latest_names
-    ON latest_names.anonymous_player_id = best_per_player.anonymous_player_id
-  ORDER BY best_per_player.best_lap_ms ASC, latest_names.latest_seen_at DESC
-  LIMIT ?3
-`
-
-const RECENT_SELECT = `
   SELECT
     anonymous_player_id,
     display_name,
-    track_id,
+    room_id,
     lap_ms AS best_lap_ms,
-    finished_at AS latest_seen_at,
-    room_id
+    ?1 AS track_id,
+    finished_at
+  FROM ranked_laps
+  WHERE row_number = 1
+  ORDER BY best_lap_ms ASC, finished_at DESC
+  LIMIT ?2
+`
+
+const PERSONAL_BEST_SELECT = `
+  SELECT
+    anonymous_player_id,
+    display_name,
+    room_id,
+    lap_ms AS best_lap_ms,
+    ?1 AS track_id,
+    finished_at
   FROM lap_times
   WHERE track_id = ?1
-  ORDER BY finished_at DESC
-  LIMIT ?2
+    AND anonymous_player_id = ?2
+  ORDER BY lap_ms ASC, finished_at DESC
+  LIMIT 1
 `
 
 export function getLeaderboardQueryParams(url) {
@@ -55,41 +53,49 @@ export function getLeaderboardQueryParams(url) {
     sanitizeTrackId(url.searchParams.get('trackId') ?? DEFAULT_TRACK_ID) ??
     DEFAULT_TRACK_ID
   const limit = clampLeaderboardLimit(url.searchParams.get('limit'))
+  const anonymousPlayerId = url.searchParams.get('anonymousPlayerId')
 
   return {
+    anonymousPlayerId: isAnonymousPlayerId(anonymousPlayerId)
+      ? anonymousPlayerId
+      : null,
     trackId,
     limit,
   }
 }
 
-export async function queryLeaderboard(env, period, { trackId, limit }) {
-  const since =
-    period === 'weekly' ? Date.now() - 7 * 24 * 60 * 60 * 1000 : null
-
-  const statement = env.DB.prepare(LEADERBOARD_SELECT).bind(trackId, since, limit)
+export async function queryLeaderboard(env, { trackId, limit }) {
+  const statement = env.DB.prepare(LEADERBOARD_SELECT).bind(trackId, limit)
   const { results = [] } = await statement.all()
 
   return results.map((row, index) => ({
     rank: index + 1,
     anonymousPlayerId: row.anonymous_player_id,
     displayName: row.display_name,
+    roomId: row.room_id,
     bestLapMs: row.best_lap_ms,
     trackId: row.track_id,
-    latestSeenAt: row.latest_seen_at,
+    bestLapRecordedAt: row.finished_at,
   }))
 }
 
-export async function queryRecentLaps(env, { trackId, limit }) {
-  const statement = env.DB.prepare(RECENT_SELECT).bind(trackId, limit)
-  const { results = [] } = await statement.all()
+export async function queryPersonalBest(env, { trackId, anonymousPlayerId }) {
+  if (!isAnonymousPlayerId(anonymousPlayerId)) {
+    return null
+  }
 
-  return results.map((row, index) => ({
-    rank: index + 1,
-    anonymousPlayerId: row.anonymous_player_id,
-    displayName: row.display_name,
-    bestLapMs: row.best_lap_ms,
-    trackId: row.track_id,
-    latestSeenAt: row.latest_seen_at,
-    roomId: row.room_id,
-  }))
+  const statement = env.DB.prepare(PERSONAL_BEST_SELECT).bind(trackId, anonymousPlayerId)
+  const result = await statement.first()
+  if (!result) {
+    return null
+  }
+
+  return {
+    anonymousPlayerId: result.anonymous_player_id,
+    displayName: result.display_name,
+    roomId: result.room_id,
+    bestLapMs: result.best_lap_ms,
+    trackId: result.track_id,
+    bestLapRecordedAt: result.finished_at,
+  }
 }

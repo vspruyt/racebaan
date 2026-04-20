@@ -63,6 +63,10 @@ export function createMultiplayerClient({ identityProvider }) {
     return true
   }
 
+  function isActiveSocket(candidate) {
+    return socket === candidate
+  }
+
   function handleServerMessage(message) {
     switch (message.type) {
       case 'joined':
@@ -78,10 +82,9 @@ export function createMultiplayerClient({ identityProvider }) {
         break
       case 'player_list':
         {
+          const players = Array.isArray(message.players) ? message.players : []
           const activePlayerIds = new Set(
-            (Array.isArray(message.players) ? message.players : []).map(
-              (player) => player.anonymousPlayerId,
-            ),
+            players.map((player) => player.anonymousPlayerId),
           )
           const remotePlayers = new Map(state.remotePlayers)
           for (const anonymousPlayerId of remotePlayers.keys()) {
@@ -90,9 +93,22 @@ export function createMultiplayerClient({ identityProvider }) {
             }
           }
 
+          for (const player of players) {
+            const existingPlayer = remotePlayers.get(player.anonymousPlayerId)
+            if (!existingPlayer) continue
+
+            remotePlayers.set(player.anonymousPlayerId, {
+              ...existingPlayer,
+              displayName: player.displayName ?? existingPlayer.displayName,
+              bestLapMs: player.bestLapMs ?? existingPlayer.bestLapMs ?? null,
+              allTimeBestLapMs:
+                player.allTimeBestLapMs ?? existingPlayer.allTimeBestLapMs ?? null,
+            })
+          }
+
         setState({
           roomStatus: message.roomStatus ?? state.roomStatus,
-          connectedPlayers: Array.isArray(message.players) ? message.players : [],
+          connectedPlayers: players,
           remotePlayers,
         })
         break
@@ -114,11 +130,25 @@ export function createMultiplayerClient({ identityProvider }) {
       case 'state_snapshot': {
         const remotePlayers = new Map(state.remotePlayers)
         const localIdentity = identityProvider()
+        const receivedAt = Date.now()
+        const connectedPlayersById = new Map(
+          state.connectedPlayers.map((player) => [player.anonymousPlayerId, player]),
+        )
 
         if (Array.isArray(message.players)) {
           for (const player of message.players) {
             if (player.anonymousPlayerId === localIdentity.anonymousPlayerId) continue
-            remotePlayers.set(player.anonymousPlayerId, player)
+            const existingPlayer = remotePlayers.get(player.anonymousPlayerId) ?? {}
+            const connectedPlayer = connectedPlayersById.get(player.anonymousPlayerId) ?? {}
+            remotePlayers.set(player.anonymousPlayerId, {
+              ...existingPlayer,
+              ...player,
+              allTimeBestLapMs:
+                connectedPlayer.allTimeBestLapMs ??
+                existingPlayer.allTimeBestLapMs ??
+                null,
+              receivedAt,
+            })
           }
         }
 
@@ -158,7 +188,8 @@ export function createMultiplayerClient({ identityProvider }) {
 
     const identity = identityProvider()
     const socketUrl = buildSocketUrl(roomId)
-    socket = new WebSocket(socketUrl)
+    const nextSocket = new WebSocket(socketUrl)
+    socket = nextSocket
 
     setState({
       connectionStatus: 'connecting',
@@ -170,7 +201,9 @@ export function createMultiplayerClient({ identityProvider }) {
       connectedPlayers: [],
     })
 
-    socket.addEventListener('open', () => {
+    nextSocket.addEventListener('open', () => {
+      if (!isActiveSocket(nextSocket)) return
+
       sendMessage({
         type: 'join',
         anonymousPlayerId: identity.anonymousPlayerId,
@@ -187,7 +220,9 @@ export function createMultiplayerClient({ identityProvider }) {
       }, PING_INTERVAL_MS)
     })
 
-    socket.addEventListener('message', (event) => {
+    nextSocket.addEventListener('message', (event) => {
+      if (!isActiveSocket(nextSocket)) return
+
       try {
         const message = JSON.parse(event.data)
         handleServerMessage(message)
@@ -196,14 +231,27 @@ export function createMultiplayerClient({ identityProvider }) {
       }
     })
 
-    socket.addEventListener('close', () => {
+    nextSocket.addEventListener('close', () => {
+      if (!isActiveSocket(nextSocket)) return
+
       clearPingTimer()
       socket = null
-      resetConnectionState()
-      emit()
+      const lastError =
+        state.connectionStatus === 'error' ? state.lastError : null
+      setState({
+        ...createInitialState(),
+        trackId: state.trackId,
+        raceLaps: state.raceLaps,
+        connectionStatus:
+          state.connectionStatus === 'error' ? 'error' : 'disconnected',
+        roomId,
+        lastError,
+      })
     })
 
-    socket.addEventListener('error', () => {
+    nextSocket.addEventListener('error', () => {
+      if (!isActiveSocket(nextSocket)) return
+
       setState({
         connectionStatus: 'error',
         lastError: 'Could not connect to the room.',

@@ -8,7 +8,7 @@ async function fetchJson(path) {
 
   if (!looksLikeJson) {
     throw new Error(
-      'Leaderboard API is not available from the static frontend alone. Run the Cloudflare Worker preview with `pnpm build`, `pnpm db:migrate:local`, and `pnpm worker:dev`.',
+      'Multiplayer API is not available from the static frontend alone. Run the Cloudflare Worker preview with `pnpm build`, `pnpm db:migrate:local`, and `pnpm worker:dev`.',
     )
   }
 
@@ -17,7 +17,7 @@ async function fetchJson(path) {
     data = JSON.parse(bodyText)
   } catch {
     throw new Error(
-      'Leaderboard API returned an unexpected response. Make sure you are loading the app through the Worker, not a static-only server.',
+      'Multiplayer API returned an unexpected response. Make sure you are loading the app through the Worker, not a static-only server.',
     )
   }
 
@@ -28,16 +28,26 @@ async function fetchJson(path) {
   return data
 }
 
-export async function fetchLeaderboards(trackId = DEFAULT_TRACK_ID) {
-  const [weekly, allTime, recent] = await Promise.all([
-    fetchJson(`/api/leaderboard/weekly?trackId=${encodeURIComponent(trackId)}&limit=10`),
-    fetchJson(`/api/leaderboard/all-time?trackId=${encodeURIComponent(trackId)}&limit=10`),
-    fetchJson(`/api/leaderboard/recent?trackId=${encodeURIComponent(trackId)}&limit=10`),
-  ])
+export async function fetchLeaderboard(trackId = DEFAULT_TRACK_ID) {
+  const leaderboard = await fetchJson(
+    `/api/leaderboard/all-time?trackId=${encodeURIComponent(trackId)}&limit=10`,
+  )
 
-  return {
-    weekly: weekly.results ?? [],
-    allTime: allTime.results ?? [],
-    recent: recent.results ?? [],
+  return leaderboard.results ?? []
+}
+
+export async function fetchPersonalBest(anonymousPlayerId, trackId = DEFAULT_TRACK_ID) {
+  if (!anonymousPlayerId) {
+    return null
   }
+
+  const response = await fetchJson(
+    `/api/leaderboard/personal?trackId=${encodeURIComponent(trackId)}&anonymousPlayerId=${encodeURIComponent(anonymousPlayerId)}`,
+  )
+
+  return response.result ?? null
+}
+
+export async function fetchRoomSummary(roomId) {
+  return fetchJson(`/api/room/${encodeURIComponent(roomId)}`)
 }

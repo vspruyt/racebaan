@@ -10,8 +10,8 @@ export const UUID_PATTERN =
 export const ROOM_MAX_PLAYERS = 8
 export const ROOM_COUNTDOWN_MS = 3000
 export const RACE_LAPS = 3
-export const PLAYER_STATE_SEND_INTERVAL_MS = 1000 / 12
-export const SNAPSHOT_BROADCAST_INTERVAL_MS = 100
+export const PLAYER_STATE_SEND_INTERVAL_MS = 1000 / 20
+export const SNAPSHOT_BROADCAST_INTERVAL_MS = 1000 / 20
 export const PING_INTERVAL_MS = 15000
 export const LEADERBOARD_DEFAULT_LIMIT = 20
 export const LEADERBOARD_MAX_LIMIT = 100
@@ -19,8 +19,44 @@ export const MAX_WS_MESSAGE_BYTES = 4096
 export const MIN_VALID_LAP_MS = 5000
 export const MAX_VALID_LAP_MS = 10 * 60 * 1000
 export const MAX_VALID_RACE_MS = 45 * 60 * 1000
-export const MAX_MESSAGES_PER_WINDOW = 120
+export const MAX_MESSAGES_PER_WINDOW = 300
 export const MESSAGE_WINDOW_MS = 10_000
+
+function getRandomBytes(length) {
+  const cryptoObject = globalThis.crypto
+  const bytes = new Uint8Array(length)
+
+  if (cryptoObject?.getRandomValues) {
+    cryptoObject.getRandomValues(bytes)
+    return bytes
+  }
+
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Math.floor(Math.random() * 256)
+  }
+
+  return bytes
+}
+
+export function createUuid() {
+  const cryptoObject = globalThis.crypto
+  if (typeof cryptoObject?.randomUUID === 'function') {
+    return cryptoObject.randomUUID()
+  }
+
+  const bytes = getRandomBytes(16)
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0'))
+  return [
+    hex.slice(0, 4).join(''),
+    hex.slice(4, 6).join(''),
+    hex.slice(6, 8).join(''),
+    hex.slice(8, 10).join(''),
+    hex.slice(10, 16).join(''),
+  ].join('-')
+}
 
 export function sanitizeDisplayName(value) {
   if (typeof value !== 'string') return null
@@ -113,7 +149,7 @@ export function shortPlayerId(anonymousPlayerId) {
 }
 
 export function createRandomRoomId() {
-  return `${DEFAULT_ROOM_ID_PREFIX}-${crypto.randomUUID().slice(0, 8)}`
+  return `${DEFAULT_ROOM_ID_PREFIX}-${createUuid().slice(0, 8)}`
 }
 
 export function buildSocketUrl(roomId, locationLike = globalThis.location) {

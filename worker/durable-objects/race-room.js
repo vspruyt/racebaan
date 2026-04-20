@@ -47,6 +47,7 @@ function createConnectionAttachment({ connectionId, ipAddress }) {
     anonymousPlayerId: null,
     displayName: null,
     trackId: DEFAULT_TRACK_ID,
+    raceStartedAt: null,
     currentLapNumber: 0,
     currentLapStartedAt: null,
     bestLapMs: null,
@@ -86,8 +87,15 @@ export class RaceRoom extends DurableObject {
 
   async fetch(request) {
     const url = new URL(request.url)
-    const roomId = url.pathname.split('/').filter(Boolean).at(-1)
+    const pathParts = url.pathname.split('/').filter(Boolean)
+    const roomId = url.pathname.endsWith('/summary')
+      ? pathParts.at(-2)
+      : pathParts.at(-1)
     const upgrade = request.headers.get('Upgrade')
+
+    if (request.method === 'GET' && url.pathname.endsWith('/summary')) {
+      return Response.json(await this.getRoomSummary(roomId))
+    }
 
     if (upgrade !== 'websocket') {
       return new Response('Expected websocket upgrade', { status: 400 })
@@ -159,6 +167,7 @@ export class RaceRoom extends DurableObject {
       const connection = this.connections.get(socket)
       if (!connection) continue
 
+      connection.attachment.raceStartedAt = roomState.raceStartedAt
       connection.attachment.currentLapNumber = 1
       connection.attachment.currentLapStartedAt = roomState.raceStartedAt
       connection.attachment.bestLapMs = null
@@ -266,6 +275,7 @@ export class RaceRoom extends DurableObject {
     const connection = this.getConnection(socket)
     if (!connection) return
 
+    const isNewJoin = !connection.attachment.joined
     const anonymousPlayerId = isAnonymousPlayerId(payload.anonymousPlayerId)
       ? payload.anonymousPlayerId
       : null
@@ -274,16 +284,6 @@ export class RaceRoom extends DurableObject {
 
     if (!anonymousPlayerId || !displayName) {
       this.sendError(socket, 'invalid_identity', 'A valid anonymous player ID and display name are required.')
-      return
-    }
-
-    if (
-      roomState.status !== 'lobby' &&
-      roomState.status !== 'countdown' &&
-      !connection.attachment.joined
-    ) {
-      this.sendError(socket, 'room_locked', 'This room already started its race. Pick a new room ID.')
-      socket.close(1008, 'Room already racing')
       return
     }
 
@@ -319,6 +319,15 @@ export class RaceRoom extends DurableObject {
     connection.attachment.displayName = displayName
     connection.attachment.trackId = trackId
     connection.attachment.lastJoinedAt = Date.now()
+    if (isNewJoin && roomState.status === 'racing') {
+      connection.attachment.raceStartedAt = connection.attachment.lastJoinedAt
+      connection.attachment.currentLapNumber = 1
+      connection.attachment.currentLapStartedAt = connection.attachment.lastJoinedAt
+      connection.attachment.bestLapMs = null
+      connection.attachment.raceMs = null
+      connection.attachment.finished = false
+      connection.attachment.finishPlace = null
+    }
     socket.serializeAttachment(connection.attachment)
 
     await this.persistRoomState()
@@ -475,13 +484,14 @@ export class RaceRoom extends DurableObject {
       return
     }
 
-    if (!roomState.raceStartedAt) {
+    const raceStartedAt = connection.attachment.raceStartedAt ?? roomState.raceStartedAt
+    if (!raceStartedAt) {
       this.sendError(socket, 'race_not_started', 'The room race has not started yet.')
       return
     }
 
     const now = Date.now()
-    const raceMs = now - roomState.raceStartedAt
+    const raceMs = now - raceStartedAt
     const reportedRaceMs = coerceFiniteInteger(payload.raceMs, MIN_VALID_LAP_MS, MAX_VALID_RACE_MS)
 
     if (
@@ -617,6 +627,24 @@ export class RaceRoom extends DurableObject {
     await this.ctx.storage.put(ROOM_STATE_KEY, this.roomState)
   }
 
+  async getRoomSummary(explicitRoomId) {
+    const storedState = await this.ctx.storage.get(ROOM_STATE_KEY)
+    const activePlayers = this.getJoinedSockets().length
+    const roomId = storedState?.roomId ?? explicitRoomId ?? this.roomState?.roomId ?? null
+    const roomStatus = storedState?.status ?? 'offline'
+    const hasActivePlayers = activePlayers > 0
+
+    return {
+      ok: true,
+      roomId,
+      exists: Boolean(storedState) || hasActivePlayers,
+      roomStatus,
+      activePlayerCount: activePlayers,
+      hasActivePlayers,
+      joinable: true,
+    }
+  }
+
   getJoinedSockets() {
     return [...this.connections.entries()]
       .filter(([, connection]) => connection.attachment.joined)
@@ -655,24 +683,66 @@ export class RaceRoom extends DurableObject {
     }
   }
 
-  broadcastPlayerList() {
-    const players = [...this.connections.values()]
-      .filter((connection) => connection.attachment.joined)
-      .map((connection) => ({
-        anonymousPlayerId: connection.attachment.anonymousPlayerId,
-        displayName: connection.attachment.displayName,
-        connectedAt: connection.attachment.connectedAt,
-        finished: connection.attachment.finished,
-        finishPlace: connection.attachment.finishPlace,
-        bestLapMs: connection.attachment.bestLapMs,
-      }))
-      .sort((left, right) => left.connectedAt - right.connectedAt)
+  async getAllTimeBestLapMap(players, trackId) {
+    const anonymousPlayerIds = players
+      .map((player) => player.anonymousPlayerId)
+      .filter((anonymousPlayerId) => typeof anonymousPlayerId === 'string')
 
-    this.broadcast({
-      type: 'player_list',
-      roomId: this.roomState?.roomId ?? null,
-      roomStatus: this.roomState?.status ?? 'lobby',
-      players,
+    if (!anonymousPlayerIds.length) {
+      return new Map()
+    }
+
+    const placeholders = anonymousPlayerIds
+      .map((_, index) => `?${index + 2}`)
+      .join(', ')
+    const statement = this.env.DB.prepare(
+      `
+        SELECT
+          anonymous_player_id,
+          MIN(lap_ms) AS best_lap_ms
+        FROM lap_times
+        WHERE track_id = ?1
+          AND anonymous_player_id IN (${placeholders})
+        GROUP BY anonymous_player_id
+      `,
+    ).bind(trackId, ...anonymousPlayerIds)
+    const { results = [] } = await statement.all()
+
+    return new Map(
+      results.map((row) => [row.anonymous_player_id, row.best_lap_ms]),
+    )
+  }
+
+  broadcastPlayerList() {
+    void (async () => {
+      const players = [...this.connections.values()]
+        .filter((connection) => connection.attachment.joined)
+        .map((connection) => ({
+          anonymousPlayerId: connection.attachment.anonymousPlayerId,
+          displayName: connection.attachment.displayName,
+          connectedAt: connection.attachment.connectedAt,
+          finished: connection.attachment.finished,
+          finishPlace: connection.attachment.finishPlace,
+          bestLapMs: connection.attachment.bestLapMs,
+        }))
+        .sort((left, right) => left.connectedAt - right.connectedAt)
+      const allTimeBestLapMap = await this.getAllTimeBestLapMap(
+        players,
+        this.roomState?.trackId ?? DEFAULT_TRACK_ID,
+      )
+
+      this.broadcast({
+        type: 'player_list',
+        roomId: this.roomState?.roomId ?? null,
+        roomStatus: this.roomState?.status ?? 'lobby',
+        players: players.map((player) => ({
+          ...player,
+          allTimeBestLapMs:
+            allTimeBestLapMap.get(player.anonymousPlayerId) ?? null,
+        })),
+      })
+    })().catch((error) => {
+      console.warn('Failed to broadcast player list', error)
     })
   }
 
