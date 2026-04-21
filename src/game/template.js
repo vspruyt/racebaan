@@ -39,6 +39,12 @@ export const APP_TEMPLATE = `
           <div class="button-row">
             <button class="start-button" type="button">Start Race</button>
           </div>
+          <div class="active-rooms-panel">
+            <div class="active-rooms-heading">
+              <span class="field-label">Rooms to join</span>
+            </div>
+            <div class="active-rooms-list" data-active-room-list></div>
+          </div>
           <p class="form-message" data-identity-message></p>
           <p class="form-message" data-room-status></p>
         </section>

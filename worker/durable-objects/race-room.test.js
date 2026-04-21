@@ -32,24 +32,51 @@ function createStorageMock() {
 }
 
 function createEnvMock() {
+  const preparedStatements = []
+  const batchedStatements = []
+
   return {
+    preparedStatements,
+    batchedStatements,
     DB: {
-      prepare() {
+      prepare(sql) {
         return {
-          bind() {
-            return {
+          bind(...params) {
+            const statement = {
+              sql,
+              params,
               async run() {
                 return {}
               },
               async all() {
                 return { results: [] }
               },
+              async first() {
+                return null
+              },
             }
+
+            preparedStatements.push(statement)
+            return statement
           },
         }
       },
+      async batch(statements) {
+        batchedStatements.push(...statements)
+        return statements.map(() => ({}))
+      },
     },
   }
+}
+
+function getSqlStatement(statements, snippet) {
+  return (
+    statements.find((statement) => statement.sql.includes(snippet)) ?? null
+  )
+}
+
+function expectSqlParams(statements, snippet, params) {
+  expect(getSqlStatement(statements, snippet)?.params).toEqual(params)
 }
 
 function createCtxMock(storage) {
@@ -101,6 +128,7 @@ function createConnection(joined = true) {
       acceptedLapSubmissions: [],
       lastJoinedAt: null,
       lastPingAt: null,
+      lastSeenAt: Date.now(),
     },
     joinedPlayerState: null,
     previousProgress: null,
@@ -114,12 +142,14 @@ function createRoomState(overrides = {}) {
   return {
     roomId: 'room-test',
     trackId: 'default',
-    status: 'lobby',
+    status: 'connected',
     countdownStartedAt: null,
     raceStartedAt: null,
     finishedAt: null,
     finishers: [],
     cleanupScheduledAt: null,
+    staleTimeoutAt: null,
+    lastActivityAt: Date.now(),
     createdAt: Date.now(),
     updatedAt: Date.now(),
     ...overrides,
@@ -170,7 +200,7 @@ describe('RaceRoom cleanup', () => {
     expect(room.roomState).toBeNull()
   })
 
-  it('starts the room immediately and waits for player_ready before arming laps', async () => {
+  it('keeps the room open and waits for player_ready before arming laps', async () => {
     const storage = createStorageMock()
     const room = new RaceRoom(createCtxMock(storage), createEnvMock())
     const socket = createSocketMock()
@@ -185,7 +215,7 @@ describe('RaceRoom cleanup', () => {
       trackId: 'default',
     })
 
-    expect(room.roomState.status).toBe('racing')
+    expect(room.roomState.status).toBe('connected')
     expect(connection.attachment.currentLapNumber).toBe(0)
     expect(connection.attachment.currentLapStartedAt).toBeNull()
 
@@ -196,5 +226,112 @@ describe('RaceRoom cleanup', () => {
     expect(
       socket.sent.some((message) => JSON.parse(message).type === 'player_ready'),
     ).toBe(true)
+  })
+
+  it('does not mark the room finished when one player completes a run', async () => {
+    const storage = createStorageMock()
+    const env = createEnvMock()
+    const room = new RaceRoom(createCtxMock(storage), env)
+    const socket = createSocketMock()
+    const connection = createConnection()
+    const raceStartedAt = Date.now() - 20_000
+
+    connection.attachment.raceStartedAt = raceStartedAt
+    connection.attachment.currentLapNumber = 4
+    connection.attachment.currentLapStartedAt = Date.now() - 6_000
+    connection.attachment.bestLapMs = 18_000
+
+    room.roomState = createRoomState()
+    room.connections.set(socket, connection)
+
+    await room.handleRaceFinished(socket, {
+      raceMs: 20_000,
+    })
+
+    expect(room.roomState.status).toBe('connected')
+    expect(room.roomState.finishedAt).toBeNull()
+    expect(connection.attachment.finished).toBe(true)
+    expect(connection.attachment.finishPlace).toBeNull()
+    expectSqlParams(env.batchedStatements, 'INSERT INTO race_results', [
+      '123e4567-e89b-42d3-a456-426614174000',
+      'Racer',
+      'room-test',
+      'default',
+      1,
+      20_000,
+      18_000,
+      Date.now(),
+    ])
+  })
+
+  it('updates stored leaderboard names when a player rejoins under a new display name', async () => {
+    const storage = createStorageMock()
+    const env = createEnvMock()
+    const room = new RaceRoom(createCtxMock(storage), env)
+    const socket = createSocketMock()
+
+    room.roomState = createRoomState()
+    room.connections.set(socket, createConnection(false))
+
+    await room.handleJoin(socket, {
+      anonymousPlayerId: '123e4567-e89b-42d3-a456-426614174000',
+      displayName: 'New Racer',
+      trackId: 'default',
+    })
+
+    expect(env.batchedStatements).toHaveLength(2)
+    expectSqlParams(env.preparedStatements, 'INSERT INTO active_rooms', [
+      'room-test',
+      1,
+      Date.now(),
+    ])
+    expectSqlParams(env.batchedStatements, 'UPDATE lap_times', [
+      'New Racer',
+      '123e4567-e89b-42d3-a456-426614174000',
+    ])
+    expectSqlParams(env.batchedStatements, 'UPDATE race_results', [
+      'New Racer',
+      '123e4567-e89b-42d3-a456-426614174000',
+    ])
+  })
+
+  it('removes the room from the active room list when the last player leaves', async () => {
+    const storage = createStorageMock()
+    const env = createEnvMock()
+    const room = new RaceRoom(createCtxMock(storage), env)
+    const socket = createSocketMock()
+
+    room.roomState = createRoomState()
+    room.connections.set(socket, createConnection())
+
+    await room.webSocketClose(socket, 1000, 'Client disconnected')
+
+    expectSqlParams(env.preparedStatements, 'DELETE FROM active_rooms', ['room-test'])
+  })
+
+  it('cleans up stale rooms even if websocket close was missed', async () => {
+    const storage = createStorageMock()
+    const env = createEnvMock()
+    const room = new RaceRoom(createCtxMock(storage), env)
+    const socket = createSocketMock()
+    const staleSeenAt = Date.now() - 80_000
+
+    room.roomState = createRoomState({
+      staleTimeoutAt: Date.now(),
+      lastActivityAt: staleSeenAt,
+    })
+    storage.value = structuredClone(room.roomState)
+
+    const connection = createConnection()
+    connection.attachment.lastSeenAt = staleSeenAt
+    connection.attachment.lastPingAt = staleSeenAt
+    room.connections.set(socket, connection)
+
+    await room.alarm()
+
+    expect(room.connections.size).toBe(0)
+    expect(storage.value).toBeUndefined()
+    expect(storage.alarmAt).toBeNull()
+    expectSqlParams(env.preparedStatements, 'DELETE FROM active_rooms', ['room-test'])
   })
 })

@@ -204,7 +204,7 @@ export function createMultiplayerClient({ identityProvider }) {
         clearLapSubmissionRetryTimer()
         setState({
           connectionStatus: 'connected',
-          roomStatus: message.roomStatus ?? 'lobby',
+          roomStatus: 'connected',
           roomId: message.roomId,
           trackId: message.trackId ?? DEFAULT_TRACK_ID,
           raceLaps: message.raceLaps ?? RACE_LAPS,
@@ -243,7 +243,8 @@ export function createMultiplayerClient({ identityProvider }) {
 
         const serverBestLapMs = getServerBackedPersonalBest(players)
         setState({
-          roomStatus: message.roomStatus ?? state.roomStatus,
+          roomStatus:
+            state.connectionStatus === 'connected' ? 'connected' : state.roomStatus,
           connectedPlayers: players,
           localPlayerAllTimeBestLapMs: getEffectiveLocalPlayerBestLapMs(serverBestLapMs),
           remotePlayers,
@@ -253,7 +254,7 @@ export function createMultiplayerClient({ identityProvider }) {
       case 'countdown_started':
         clearLapSubmissionRetryTimer()
         setState({
-          roomStatus: 'countdown',
+          roomStatus: 'connected',
           countdownStartedAt:
             (message.startsAt ?? Date.now()) - (message.countdownMs ?? 0),
           countdownMs: message.countdownMs ?? state.countdownMs,
@@ -264,7 +265,7 @@ export function createMultiplayerClient({ identityProvider }) {
       case 'race_started':
         clearLapSubmissionRetryTimer()
         setState({
-          roomStatus: 'racing',
+          roomStatus: 'connected',
           raceStartedAt: message.startedAt ?? Date.now(),
           pendingLapSubmission: null,
           lastLapSubmission: null,
@@ -272,7 +273,6 @@ export function createMultiplayerClient({ identityProvider }) {
         break
       case 'player_ready':
         setState({
-          roomStatus: 'racing',
           raceStartedAt: message.startedAt ?? Date.now(),
           lastError: null,
         })
@@ -307,7 +307,6 @@ export function createMultiplayerClient({ identityProvider }) {
       }
       case 'race_finished':
         setState({
-          roomStatus: 'finished',
           connectedPlayers: state.connectedPlayers.map((player) =>
             player.anonymousPlayerId === message.anonymousPlayerId
               ? {
@@ -467,7 +466,7 @@ export function createMultiplayerClient({ identityProvider }) {
   }
 
   function sendPlayerState(playerState) {
-    if (state.roomStatus !== 'racing') return
+    if (state.connectionStatus !== 'connected') return
     const identity = identityProvider()
     sendMessage({
       type: 'player_state',

@@ -25,17 +25,20 @@ import {
 const ROOM_STATE_KEY = 'room-state'
 const MAX_STORED_ACCEPTED_LAPS = 6
 const ROOM_CLEANUP_DELAY_MS = 5 * 60 * 1000
+const ROOM_STALE_TIMEOUT_MS = 75_000
 
 function createRoomState(roomId) {
   return {
     roomId,
     trackId: DEFAULT_TRACK_ID,
-    status: 'lobby',
+    status: 'connected',
     countdownStartedAt: null,
     raceStartedAt: null,
     finishedAt: null,
     finishers: [],
     cleanupScheduledAt: null,
+    staleTimeoutAt: null,
+    lastActivityAt: Date.now(),
     createdAt: Date.now(),
     updatedAt: Date.now(),
   }
@@ -60,6 +63,7 @@ function createConnectionAttachment({ connectionId, ipAddress }) {
     acceptedLapSubmissions: [],
     lastJoinedAt: null,
     lastPingAt: null,
+    lastSeenAt: Date.now(),
   }
 }
 
@@ -88,6 +92,11 @@ export class RaceRoom extends DurableObject {
         connectionId: crypto.randomUUID(),
         ipAddress: 'unknown',
       })
+      attachment.lastSeenAt ??=
+        attachment.lastPingAt ??
+        attachment.lastJoinedAt ??
+        attachment.connectedAt ??
+        Date.now()
       this.connections.set(socket, {
         attachment,
         joinedPlayerState: null,
@@ -162,6 +171,19 @@ export class RaceRoom extends DurableObject {
     const roomState = await this.getRoomState()
     const now = Date.now()
 
+    this.pruneStaleConnections(now)
+
+    if (roomState.staleTimeoutAt && now >= roomState.staleTimeoutAt) {
+      if (this.connections.size === 0) {
+        await this.clearRoomStorage()
+        return
+      }
+
+      roomState.staleTimeoutAt = null
+      await this.persistRoomState()
+      await this.scheduleNextAlarm()
+    }
+
     if (roomState.cleanupScheduledAt && now >= roomState.cleanupScheduledAt) {
       if (this.connections.size === 0) {
         await this.clearRoomStorage()
@@ -172,47 +194,17 @@ export class RaceRoom extends DurableObject {
       await this.persistRoomState()
     }
 
-    const connectedPlayers = this.getJoinedSockets()
-
-    if (roomState.status !== 'countdown' || !roomState.raceStartedAt) {
-      return
-    }
-
-    if (connectedPlayers.length === 0) {
-      roomState.status = 'lobby'
-      roomState.countdownStartedAt = null
-      roomState.raceStartedAt = null
+    if (this.getJoinedSockets().length === 0) {
+      roomState.status = 'offline'
+      await this.syncActiveRoomPresence(roomState.roomId, 0)
       await this.scheduleRoomCleanup()
       return
     }
 
-    roomState.status = 'racing'
+    roomState.status = 'connected'
     roomState.updatedAt = now
-
-    for (const socket of connectedPlayers) {
-      const connection = this.connections.get(socket)
-      if (!connection) continue
-
-      connection.attachment.raceStartedAt = roomState.raceStartedAt
-      connection.attachment.currentLapNumber = 1
-      connection.attachment.currentLapStartedAt = roomState.raceStartedAt
-      connection.attachment.bestLapMs = null
-      connection.attachment.raceMs = null
-      connection.attachment.finished = false
-      connection.attachment.finishPlace = null
-      connection.attachment.acceptedLapSubmissions = []
-      socket.serializeAttachment(connection.attachment)
-    }
-
     await this.persistRoomState()
-    this.broadcast({
-      type: 'race_started',
-      roomId: roomState.roomId,
-      trackId: roomState.trackId,
-      raceLaps: RACE_LAPS,
-      startedAt: roomState.raceStartedAt,
-    })
-    this.broadcastPlayerList()
+    await this.scheduleNextAlarm()
   }
 
   async webSocketMessage(socket, message) {
@@ -266,7 +258,7 @@ export class RaceRoom extends DurableObject {
         await this.handleRaceFinished(socket, payload)
         break
       case 'ping':
-        connection.attachment.lastPingAt = Date.now()
+        await this.recordRoomActivity(socket, connection)
         socket.send(
           JSON.stringify({
             type: 'pong',
@@ -300,6 +292,7 @@ export class RaceRoom extends DurableObject {
     if (this.connections.size === 0) {
       await this.handleRoomBecameIdle()
     }
+    await this.syncActiveRoomPresence()
     this.broadcastPlayerList()
   }
 
@@ -322,12 +315,6 @@ export class RaceRoom extends DurableObject {
 
     if (roomState.cleanupScheduledAt) {
       await this.cancelRoomCleanup()
-    }
-
-    if (roomState.status === 'finished' && this.getJoinedSockets().length <= 1) {
-      this.roomState = createRoomState(roomState.roomId)
-      this.roomState.trackId = trackId
-      roomState = this.roomState
     }
 
     if (
@@ -356,24 +343,23 @@ export class RaceRoom extends DurableObject {
     connection.attachment.displayName = displayName
     connection.attachment.trackId = trackId
     connection.attachment.lastJoinedAt = Date.now()
+    connection.attachment.lastSeenAt = connection.attachment.lastJoinedAt
+    connection.attachment.lastPingAt = connection.attachment.lastJoinedAt
     if (isNewJoin) {
       this.resetConnectionRaceState(connection)
     }
-    if (roomState.status === 'lobby') {
-      this.roomState.status = 'racing'
-      this.roomState.countdownStartedAt = null
-      this.roomState.raceStartedAt = connection.attachment.lastJoinedAt
-    }
+    this.roomState.status = 'connected'
     socket.serializeAttachment(connection.attachment)
 
-    await this.persistRoomState()
+    await this.syncStoredDisplayName(anonymousPlayerId, displayName)
+    await this.recordRoomActivity(socket, connection)
 
     socket.send(
       JSON.stringify({
         type: 'joined',
         roomId: roomState.roomId,
         trackId: this.roomState.trackId,
-        roomStatus: this.roomState.status,
+        roomStatus: 'connected',
         raceLaps: RACE_LAPS,
         countdownMs: ROOM_COUNTDOWN_MS,
         serverTime: Date.now(),
@@ -391,21 +377,36 @@ export class RaceRoom extends DurableObject {
         roomId: roomState.roomId,
         anonymousPlayerId,
         displayName,
-        roomStatus: this.roomState.status,
+        roomStatus: 'connected',
       }),
     )
   }
 
+  async syncStoredDisplayName(anonymousPlayerId, displayName) {
+    await this.env.DB.batch([
+      this.env.DB.prepare(
+        `
+          UPDATE lap_times
+          SET display_name = ?1
+          WHERE anonymous_player_id = ?2
+            AND display_name != ?1
+        `,
+      ).bind(displayName, anonymousPlayerId),
+      this.env.DB.prepare(
+        `
+          UPDATE race_results
+          SET display_name = ?1
+          WHERE anonymous_player_id = ?2
+            AND display_name != ?1
+        `,
+      ).bind(displayName, anonymousPlayerId),
+    ])
+  }
+
   async handlePlayerReady(socket) {
-    const roomState = await this.getRoomState()
     const connection = this.getConnection(socket)
     if (!connection?.attachment.joined) {
       this.sendError(socket, 'not_joined', 'Join the room before starting your race.')
-      return
-    }
-
-    if (roomState.status !== 'racing') {
-      this.sendError(socket, 'race_not_started', 'The room race is not live yet.')
       return
     }
 
@@ -425,14 +426,9 @@ export class RaceRoom extends DurableObject {
   }
 
   async handlePlayerState(socket, payload) {
-    const roomState = await this.getRoomState()
     const connection = this.getConnection(socket)
     if (!connection?.attachment.joined) {
       this.sendError(socket, 'not_joined', 'Join the room before sending race updates.')
-      return
-    }
-
-    if (roomState.status !== 'racing') {
       return
     }
 
@@ -461,7 +457,7 @@ export class RaceRoom extends DurableObject {
       return
     }
 
-    if (roomState.status !== 'racing' || !connection.attachment.currentLapStartedAt) {
+    if (!connection.attachment.currentLapStartedAt) {
       this.sendError(socket, 'race_not_started', 'The room race has not started yet.')
       return
     }
@@ -557,7 +553,7 @@ export class RaceRoom extends DurableObject {
       return
     }
 
-    if (roomState.status !== 'racing' || connection.attachment.finished) {
+    if (connection.attachment.finished) {
       return
     }
 
@@ -585,17 +581,8 @@ export class RaceRoom extends DurableObject {
       return
     }
 
-    roomState.finishers.push({
-      anonymousPlayerId: connection.attachment.anonymousPlayerId,
-      displayName: connection.attachment.displayName,
-      place: roomState.finishers.length + 1,
-      raceMs,
-      bestLapMs: connection.attachment.bestLapMs,
-      finishedAt: now,
-    })
-
     connection.attachment.finished = true
-    connection.attachment.finishPlace = roomState.finishers.length
+    connection.attachment.finishPlace = null
     connection.attachment.raceMs = raceMs
     socket.serializeAttachment(connection.attachment)
 
@@ -619,7 +606,7 @@ export class RaceRoom extends DurableObject {
         connection.attachment.displayName,
         roomState.roomId,
         roomState.trackId,
-        connection.attachment.finishPlace,
+        1,
         raceMs,
         connection.attachment.bestLapMs,
         now,
@@ -646,11 +633,6 @@ export class RaceRoom extends DurableObject {
       ),
     ])
 
-    if (roomState.finishers.length === this.getJoinedSockets().length) {
-      roomState.status = 'finished'
-      roomState.finishedAt = now
-    }
-
     roomState.updatedAt = now
     await this.persistRoomState()
 
@@ -658,7 +640,7 @@ export class RaceRoom extends DurableObject {
       type: 'race_finished',
       anonymousPlayerId: connection.attachment.anonymousPlayerId,
       displayName: connection.attachment.displayName,
-      place: connection.attachment.finishPlace,
+      place: null,
       raceMs,
       bestLapMs: connection.attachment.bestLapMs,
       finishedAt: now,
@@ -686,6 +668,8 @@ export class RaceRoom extends DurableObject {
       if (explicitRoomId && !this.roomState.roomId) {
         this.roomState.roomId = explicitRoomId
       }
+      this.roomState.lastActivityAt ??= this.roomState.updatedAt ?? Date.now()
+      this.roomState.staleTimeoutAt ??= null
       return this.roomState
     }
 
@@ -697,6 +681,8 @@ export class RaceRoom extends DurableObject {
       if (explicitRoomId && !this.roomState.roomId) {
         this.roomState.roomId = explicitRoomId
       }
+      this.roomState.lastActivityAt ??= this.roomState.updatedAt ?? Date.now()
+      this.roomState.staleTimeoutAt ??= null
       return this.roomState
     })()
 
@@ -713,11 +699,8 @@ export class RaceRoom extends DurableObject {
     const roomState = await this.getRoomState()
     if (!roomState) return
 
-    if (roomState.status === 'countdown') {
-      roomState.status = 'lobby'
-      roomState.countdownStartedAt = null
-      roomState.raceStartedAt = null
-    }
+    roomState.status = 'offline'
+    roomState.staleTimeoutAt = null
 
     await this.scheduleRoomCleanup()
   }
@@ -727,7 +710,7 @@ export class RaceRoom extends DurableObject {
 
     this.roomState.cleanupScheduledAt = Date.now() + delayMs
     await this.persistRoomState()
-    this.ctx.storage.setAlarm(this.roomState.cleanupScheduledAt)
+    await this.scheduleNextAlarm()
   }
 
   async cancelRoomCleanup() {
@@ -735,22 +718,108 @@ export class RaceRoom extends DurableObject {
 
     this.roomState.cleanupScheduledAt = null
     await this.persistRoomState()
-    await this.ctx.storage.deleteAlarm()
+    await this.scheduleNextAlarm()
   }
 
   async clearRoomStorage() {
+    await this.syncActiveRoomPresence(this.roomState?.roomId ?? null, 0)
     this.roomState = null
     this.roomStatePromise = null
     this.lastSnapshotBroadcastAt = 0
     await this.ctx.storage.deleteAll()
   }
 
+  async scheduleNextAlarm() {
+    const nextAlarmAt = [this.roomState?.cleanupScheduledAt, this.roomState?.staleTimeoutAt]
+      .filter((value) => Number.isFinite(value))
+      .sort((left, right) => left - right)[0]
+
+    if (Number.isFinite(nextAlarmAt)) {
+      this.ctx.storage.setAlarm(nextAlarmAt)
+      return
+    }
+
+    await this.ctx.storage.deleteAlarm()
+  }
+
+  async recordRoomActivity(socket, connection, now = Date.now()) {
+    if (!this.roomState) return
+
+    this.roomState.status = 'connected'
+    this.roomState.lastActivityAt = now
+    this.roomState.cleanupScheduledAt = null
+    this.roomState.staleTimeoutAt = now + ROOM_STALE_TIMEOUT_MS
+    connection.attachment.lastSeenAt = now
+    connection.attachment.lastPingAt = now
+    socket.serializeAttachment(connection.attachment)
+    await this.persistRoomState()
+    await this.syncActiveRoomPresence()
+    await this.scheduleNextAlarm()
+  }
+
+  pruneStaleConnections(now = Date.now()) {
+    for (const [socket, connection] of this.connections.entries()) {
+      const lastSeenAt =
+        connection.attachment.lastSeenAt ??
+        connection.attachment.lastPingAt ??
+        connection.attachment.lastJoinedAt ??
+        connection.attachment.connectedAt
+
+      if (!Number.isFinite(lastSeenAt) || now - lastSeenAt < ROOM_STALE_TIMEOUT_MS) {
+        continue
+      }
+
+      try {
+        socket.close(1001, 'Connection timed out')
+      } catch (error) {
+        console.warn('Failed to close stale websocket', error)
+      }
+
+      this.connections.delete(socket)
+    }
+  }
+
+  async syncActiveRoomPresence(explicitRoomId = null, explicitPlayerCount = null) {
+    const roomId = explicitRoomId ?? this.roomState?.roomId ?? null
+    if (!roomId) return
+
+    const activePlayerCount = explicitPlayerCount ?? this.getJoinedSockets().length
+
+    if (activePlayerCount > 0) {
+      await this.env.DB.prepare(
+        `
+          INSERT INTO active_rooms (
+            room_id,
+            active_player_count,
+            updated_at
+          )
+          VALUES (?1, ?2, ?3)
+          ON CONFLICT(room_id) DO UPDATE SET
+            active_player_count = excluded.active_player_count,
+            updated_at = excluded.updated_at
+        `,
+      )
+        .bind(roomId, activePlayerCount, Date.now())
+        .run()
+      return
+    }
+
+    await this.env.DB.prepare(
+      `
+        DELETE FROM active_rooms
+        WHERE room_id = ?1
+      `,
+    )
+      .bind(roomId)
+      .run()
+  }
+
   async getRoomSummary(explicitRoomId) {
     const storedState = await this.ctx.storage.get(ROOM_STATE_KEY)
     const activePlayers = this.getJoinedSockets().length
-    const roomId = storedState?.roomId ?? explicitRoomId ?? this.roomState?.roomId ?? null
-    const roomStatus = storedState?.status ?? 'offline'
     const hasActivePlayers = activePlayers > 0
+    const roomId = storedState?.roomId ?? explicitRoomId ?? this.roomState?.roomId ?? null
+    const roomStatus = hasActivePlayers ? 'connected' : 'offline'
 
     return {
       ok: true,
@@ -845,7 +914,7 @@ export class RaceRoom extends DurableObject {
       this.broadcast({
         type: 'player_list',
         roomId: this.roomState?.roomId ?? null,
-        roomStatus: this.roomState?.status ?? 'lobby',
+        roomStatus: this.getJoinedSockets().length > 0 ? 'connected' : 'offline',
         players: players.map((player) => ({
           ...player,
           allTimeBestLapMs:

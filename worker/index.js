@@ -4,6 +4,10 @@ import {
   sanitizeTrackId,
 } from '../shared/multiplayer.js'
 import { RaceRoom } from './durable-objects/race-room.js'
+import {
+  getActiveRoomsQueryParams,
+  queryActiveRooms,
+} from './lib/active-rooms.js'
 import { errorJson, json } from './lib/http.js'
 import {
   getLeaderboardQueryParams,
@@ -59,6 +63,24 @@ async function handleRoomSummaryRequest(env, url) {
   return stub.fetch(new Request(forwardUrl, { method: 'GET' }))
 }
 
+async function handleActiveRoomsRequest(env, url) {
+  const params = getActiveRoomsQueryParams(url)
+  const results = await queryActiveRooms(env, params)
+
+  return json(
+    {
+      ok: true,
+      limit: params.limit,
+      results,
+    },
+    {
+      headers: {
+        'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
+      },
+    },
+  )
+}
+
 async function handleRoomSocket(request, env, url) {
   const roomId = sanitizeRoomId(url.pathname.split('/').at(-1) ?? '')
   if (!roomId) {
@@ -91,6 +113,10 @@ export default {
 
     if (url.pathname.startsWith('/api/leaderboard/')) {
       return handleLeaderboardRequest(env, url)
+    }
+
+    if (url.pathname === '/api/rooms/active') {
+      return handleActiveRoomsRequest(env, url)
     }
 
     if (url.pathname.startsWith('/api/room/')) {

@@ -948,6 +948,82 @@ h1 {
   color: rgba(24, 57, 82, 0.74);
 }
 
+.active-rooms-panel {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.active-rooms-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.active-room-row {
+  appearance: none;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 0.65rem;
+  align-items: center;
+  width: 100%;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid rgba(73, 139, 199, 0.18);
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.6);
+  color: #12334a;
+  cursor: pointer;
+  text-align: left;
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease,
+    border-color 160ms ease;
+}
+
+.active-room-row:hover {
+  transform: translateY(-1px);
+  border-color: rgba(249, 115, 22, 0.3);
+  box-shadow: 0 0.8rem 1.6rem rgba(86, 138, 179, 0.12);
+}
+
+.active-room-row:focus-visible {
+  outline: 3px solid rgba(125, 211, 252, 0.42);
+  outline-offset: 3px;
+}
+
+.active-room-name {
+  min-width: 0;
+  overflow: hidden;
+  font-family: 'Courier New', monospace;
+  font-weight: 700;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.active-room-meta,
+.active-room-cta,
+.active-room-empty {
+  font-family: Arial, sans-serif;
+  font-size: 0.82rem;
+}
+
+.active-room-meta {
+  color: rgba(24, 57, 82, 0.72);
+  white-space: nowrap;
+}
+
+.active-room-cta {
+  font-weight: 700;
+  color: #0f6c9f;
+  white-space: nowrap;
+}
+
+.active-room-empty {
+  padding: 0.8rem;
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.52);
+  color: rgba(24, 57, 82, 0.72);
+}
+
 .button-row {
   display: flex;
   gap: 0.6rem;
@@ -1361,6 +1437,24 @@ code {
     margin-bottom: 1.1rem;
   }
 
+  .active-rooms-panel {
+    margin-bottom: 0.45rem;
+  }
+
+  .active-room-row {
+    grid-template-columns: 1fr auto;
+    gap: 0.2rem 0.55rem;
+    align-items: baseline;
+  }
+
+  .active-room-name {
+    grid-column: 1 / -1;
+  }
+
+  .active-room-cta {
+    justify-self: end;
+  }
+
   .form-message {
     min-height: 0;
   }
@@ -1534,6 +1628,12 @@ code {
     padding: 0 0.15rem;
   }
 
+  .player-list-card .player-row {
+    grid-template-columns: 1fr;
+    gap: 0.08rem;
+    justify-items: start;
+  }
+
   .player-list-heading {
     color: rgba(15, 23, 42, 0.82);
   }
@@ -1546,6 +1646,11 @@ code {
   .player-list-card .player-meta,
   .player-list-card .player-list-empty {
     color: rgba(15, 23, 42, 0.68);
+  }
+
+  .player-list-card .player-meta {
+    justify-self: start;
+    white-space: normal;
   }
 
   .touch-button-label {

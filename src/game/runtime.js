@@ -268,7 +268,7 @@ let rearLeftWheelGroup
 let rearRightWheelGroup
 let steeringWheelGroup
 let remotePlayersGroup
-let lastMultiplayerRoomStatus = 'offline'
+let lastMultiplayerConnectionStatus = 'disconnected'
 let localPlayerStateAccumulator = 0
 let localRaceFinishedSent = false
 let localRaceCountdownEndsAtMs = 0
@@ -440,8 +440,8 @@ function roundSnapshotValue(value) {
 
 function createRemotePlayerNameTag() {
   const canvas = document.createElement('canvas')
-  canvas.width = 220
-  canvas.height = 92
+  canvas.width = 300
+  canvas.height = 96
 
   const context = canvas.getContext('2d')
   const texture = new THREE.CanvasTexture(canvas)
@@ -476,7 +476,11 @@ function updateRemotePlayerNameTag(nameTag, displayName, allTimeBestLapMs = null
     Number.isFinite(allTimeBestLapMs) && allTimeBestLapMs > 0
       ? formatLapTime(allTimeBestLapMs / 1000)
       : ''
-  const combinedText = `${label}\n${recordLabel}`
+  const compactLayout =
+    prefersTouchControls || window.matchMedia?.('(max-width: 640px)')?.matches
+  const combinedText = compactLayout
+    ? `${label} · ${recordLabel}`
+    : `${label}\n${recordLabel}`
   if (!nameTag.context || combinedText === nameTag.text) {
     return
   }
@@ -524,9 +528,15 @@ function updateRemotePlayerNameTag(nameTag, displayName, allTimeBestLapMs = null
   context.stroke()
 
   context.fillStyle = '#f8fafc'
-  context.font = '600 24px Arial'
+  context.font = compactLayout ? '600 22px Arial' : '600 24px Arial'
   context.textAlign = 'center'
   context.textBaseline = 'middle'
+  if (compactLayout && recordLabel) {
+    context.fillText(`${label} · ${recordLabel}`, canvas.width / 2, canvas.height / 2 + 1)
+    texture.needsUpdate = true
+    return
+  }
+
   context.fillText(label, canvas.width / 2, recordLabel ? 33 : canvas.height / 2 + 1)
 
   if (recordLabel) {
@@ -699,8 +709,8 @@ function setRemotePlayerTargetTransform(visual) {
   return true
 }
 
-function getMultiplayerRoomStatus() {
-  return multiplayer?.getState().roomStatus ?? 'offline'
+function isMultiplayerConnected() {
+  return multiplayer?.getState().connectionStatus === 'connected'
 }
 
 function clearLocalRaceCountdown() {
@@ -795,43 +805,26 @@ function syncMultiplayerRoomStatus(force = false) {
     return
   }
 
-  const roomStatus = getMultiplayerRoomStatus()
+  const connectionStatus = multiplayer.getState().connectionStatus
   const waitingForLocalRaceCountdown =
-    roomStatus === 'racing' &&
+    connectionStatus === 'connected' &&
     raceState.mode !== 'racing' &&
     raceState.mode !== 'gameOver'
-  if (!force && roomStatus === lastMultiplayerRoomStatus && !waitingForLocalRaceCountdown) {
+  if (
+    !force &&
+    connectionStatus === lastMultiplayerConnectionStatus &&
+    !waitingForLocalRaceCountdown
+  ) {
     return
   }
 
-  const previousStatus = lastMultiplayerRoomStatus
-  lastMultiplayerRoomStatus = roomStatus
+  const previousStatus = lastMultiplayerConnectionStatus
+  lastMultiplayerConnectionStatus = connectionStatus
 
-  if (roomStatus === 'lobby') {
-    clearLocalRaceCountdown()
-    resetRaceSession()
-    raceState.mode = 'waiting'
-    physicsState.frozen = true
-    localPlayerStateAccumulator = 0
-    localRaceFinishedSent = false
-    return
-  }
-
-  if (roomStatus === 'countdown') {
-    if (previousStatus !== 'countdown' || force) {
+  if (connectionStatus === 'connected') {
+    if (previousStatus !== 'connected' || force) {
       resetRaceSession()
       if (gameScreenVisible) {
-        startLocalRaceCountdown()
-      }
-    }
-    applyLocalRaceCountdownGate()
-    return
-  }
-
-  if (roomStatus === 'racing') {
-    if (previousStatus !== 'racing' || force) {
-      resetRaceSession()
-      if (gameScreenVisible && (force || previousStatus !== 'countdown')) {
         startLocalRaceCountdown()
       }
     }
@@ -851,14 +844,7 @@ function syncMultiplayerRoomStatus(force = false) {
     return
   }
 
-  if (roomStatus === 'finished') {
-    clearLocalRaceCountdown()
-    raceState.mode = 'waiting'
-    physicsState.frozen = true
-    return
-  }
-
-  if (previousStatus === 'lobby' || previousStatus === 'countdown' || previousStatus === 'racing') {
+  if (previousStatus === 'connected') {
     resetRaceSession()
   }
 
@@ -893,7 +879,7 @@ function handleLapCompleted() {
 }
 
 function sendLocalPlayerStateIfNeeded(frameDelta) {
-  if (!multiplayer || getMultiplayerRoomStatus() !== 'racing' || raceState.mode !== 'racing') {
+  if (!multiplayer || !isMultiplayerConnected() || raceState.mode !== 'racing') {
     return
   }
 

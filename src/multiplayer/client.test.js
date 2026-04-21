@@ -101,6 +101,7 @@ describe('createMultiplayerClient', () => {
     })
 
     expect(client.getState().connectionStatus).toBe('connected')
+    expect(client.getState().roomStatus).toBe('connected')
     expect(client.getState().roomId).toBe('room-two')
   })
 
@@ -282,5 +283,80 @@ describe('createMultiplayerClient', () => {
     client.reportPlayerReady()
 
     expect(socket.sent).toContain(JSON.stringify({ type: 'player_ready' }))
+  })
+
+  it('keeps the room connected after another player finishes a run', () => {
+    globalThis.window = {
+      clearInterval: vi.fn(),
+      setInterval: vi.fn(() => 1),
+    }
+    globalThis.WebSocket = MockWebSocket
+    globalThis.location = {
+      protocol: 'https:',
+      host: 'racebaan.test',
+    }
+
+    const client = createMultiplayerClient({
+      identityProvider: createIdentityProvider(),
+    })
+
+    client.connect({ roomId: 'room-test', trackId: DEFAULT_TRACK_ID })
+    const socket = MockWebSocket.instances[0]
+    socket.readyState = MockWebSocket.OPEN
+    socket.emit('open')
+    socket.emit('message', {
+      data: JSON.stringify({
+        type: 'joined',
+        roomId: 'room-test',
+        roomStatus: 'connected',
+        trackId: DEFAULT_TRACK_ID,
+      }),
+    })
+    socket.emit('message', {
+      data: JSON.stringify({
+        type: 'player_list',
+        roomId: 'room-test',
+        roomStatus: 'connected',
+        players: [
+          {
+            anonymousPlayerId: '123e4567-e89b-42d3-a456-426614174000',
+            displayName: 'Vincent',
+            allTimeBestLapMs: null,
+            bestLapMs: null,
+            finishPlace: null,
+            finished: false,
+          },
+          {
+            anonymousPlayerId: '223e4567-e89b-42d3-a456-426614174000',
+            displayName: 'Teammate',
+            allTimeBestLapMs: 21000,
+            bestLapMs: 22000,
+            finishPlace: null,
+            finished: false,
+          },
+        ],
+      }),
+    })
+
+    socket.emit('message', {
+      data: JSON.stringify({
+        type: 'race_finished',
+        anonymousPlayerId: '223e4567-e89b-42d3-a456-426614174000',
+        bestLapMs: 21950,
+        place: null,
+      }),
+    })
+
+    client.sendPlayerState({
+      timestamp: Date.now(),
+      position: [0, 0, 0],
+      quaternion: [0, 0, 0, 1],
+      velocity: [0, 0, 0],
+      lap: 1,
+      progress: 0.2,
+    })
+
+    expect(client.getState().roomStatus).toBe('connected')
+    expect(socket.sent.at(-1)).toContain('"type":"player_state"')
   })
 })

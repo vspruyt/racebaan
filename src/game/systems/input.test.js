@@ -89,4 +89,26 @@ describe('createInputSystem', () => {
 
     expect(touchActionState.boostMode).toBe('boost')
   })
+
+  it('uses full throttle for touch boost mode', () => {
+    const { inputSystem } = createInputSystemForTest({
+      raceMode: 'racing',
+      prefersTouchControls: true,
+    })
+
+    inputSystem.setTouchBoostMode('boost')
+
+    expect(inputSystem.getDriveInputState().accelerate).toBe(1)
+  })
+
+  it('uses full throttle for touch superboost mode', () => {
+    const { inputSystem } = createInputSystemForTest({
+      raceMode: 'racing',
+      prefersTouchControls: true,
+    })
+
+    inputSystem.setTouchBoostMode('superboost')
+
+    expect(inputSystem.getDriveInputState().accelerate).toBe(1)
+  })
 })

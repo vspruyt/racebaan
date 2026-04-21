@@ -1,7 +1,7 @@
 import { DEFAULT_TRACK_ID } from '../../shared/multiplayer.js'
 
-async function fetchJson(path) {
-  const response = await fetch(path)
+async function fetchJson(path, init) {
+  const response = await fetch(path, init)
   const contentType = response.headers.get('content-type') ?? ''
   const bodyText = await response.text()
   const looksLikeJson = contentType.includes('application/json')
@@ -49,5 +49,19 @@ export async function fetchPersonalBest(anonymousPlayerId, trackId = DEFAULT_TRA
 }
 
 export async function fetchRoomSummary(roomId) {
-  return fetchJson(`/api/room/${encodeURIComponent(roomId)}`)
+  return fetchJson(`/api/room/${encodeURIComponent(roomId)}`, {
+    cache: 'no-store',
+  })
+}
+
+export async function fetchActiveRooms(limit = 6) {
+  const cacheBust = Date.now()
+  const response = await fetchJson(
+    `/api/rooms/active?limit=${encodeURIComponent(limit)}&t=${encodeURIComponent(cacheBust)}`,
+    {
+      cache: 'no-store',
+    },
+  )
+
+  return response.results ?? []
 }

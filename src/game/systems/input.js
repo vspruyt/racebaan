@@ -117,7 +117,7 @@ export function createInputSystem({
       (keyState.ArrowRight || keyState.KeyD ? 1 : 0)
     const touchButtonThrottle =
       prefersTouchControls && touchActionState.boostMode !== 'none'
-        ? TOUCH_DRIVE_HOLD_THROTTLE
+        ? 1
         : 0
 
     return {

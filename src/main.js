@@ -10,6 +10,7 @@ import {
   saveRoomId,
 } from './multiplayer/identity.js'
 import {
+  fetchActiveRooms,
   fetchLeaderboard,
   fetchPersonalBest,
   fetchRoomSummary,
@@ -22,6 +23,7 @@ import {
 
 const app = document.querySelector('#app')
 const IDLE_DISCONNECT_MS = 3 * 60 * 1000
+const ACTIVE_ROOMS_REFRESH_MS = 2000
 const ROOM_LOOKUP_DEBOUNCE_MS = 250
 
 app.innerHTML = APP_TEMPLATE
@@ -34,6 +36,7 @@ const roomStatusMessage = app.querySelector('[data-room-status]')
 const roomIdShareInput = app.querySelector('[data-room-id-share-input]')
 const copyRoomButton = app.querySelector('[data-copy-room-button]')
 const leaveRoomButton = app.querySelector('[data-leave-room-button]')
+const activeRoomList = app.querySelector('[data-active-room-list]')
 const playerList = app.querySelector('[data-player-list]')
 const playerCount = app.querySelector('[data-player-count]')
 const allTimeLeaderboard = app.querySelector('[data-all-time-leaderboard]')
@@ -54,6 +57,8 @@ let previousLapSubmissionResolvedAt = null
 let previousLocalPlayerBestLapMs = null
 let pendingGameLaunch = false
 let pendingGameLaunchMode = 'start'
+let activeRooms = []
+let activeRoomsLoading = false
 let roomSummary = {
   roomId: null,
   activePlayerCount: 0,
@@ -110,7 +115,7 @@ function syncMobileHudOffset() {
   }
 
   const topPanelHeight = Math.ceil(
-    (app.querySelector('.room-share-card')?.getBoundingClientRect().height ?? 0) + 12,
+    (app.querySelector('.multiplayer-panel')?.getBoundingClientRect().height ?? 0) + 12,
   )
   app.style.setProperty('--mobile-top-panel-height', `${topPanelHeight}px`)
 }
@@ -237,6 +242,59 @@ function renderLeaderboardError(container, message) {
   container.innerHTML = `<div class="leaderboard-empty">${message}</div>`
 }
 
+function renderActiveRooms() {
+  if (!activeRoomList) return
+
+  if (activeRoomsLoading && activeRooms.length === 0) {
+    activeRoomList.innerHTML =
+      '<div class="active-room-empty">Looking for rooms with racers in them...</div>'
+    return
+  }
+
+  if (!activeRooms.length) {
+    activeRoomList.innerHTML =
+      '<div class="active-room-empty">No rooms are live right now. Start one and invite a friend.</div>'
+    return
+  }
+
+  activeRoomList.innerHTML = activeRooms
+    .map(
+      (room) => `
+        <button
+          class="active-room-row"
+          type="button"
+          data-active-room-id="${room.roomId}"
+        >
+          <span class="active-room-name">${room.roomId}</span>
+          <span class="active-room-meta">${room.activePlayerCount} player(s)</span>
+          <span class="active-room-cta">Join</span>
+        </button>
+      `,
+    )
+    .join('')
+}
+
+async function loadActiveRooms() {
+  activeRoomsLoading = true
+  renderActiveRooms()
+
+  try {
+    const rooms = await fetchActiveRooms()
+    activeRooms = rooms.filter(
+      (room) =>
+        typeof room?.roomId === 'string' &&
+        room.roomId &&
+        Number.isFinite(room.activePlayerCount) &&
+        room.activePlayerCount > 0,
+    )
+  } catch {
+    activeRooms = []
+  } finally {
+    activeRoomsLoading = false
+    renderActiveRooms()
+  }
+}
+
 async function loadLeaderboards() {
   try {
     const leaderboard = await fetchLeaderboard(DEFAULT_TRACK_ID)
@@ -305,16 +363,7 @@ async function refreshRoomSummary(roomId) {
       joinable: summary.joinable !== false,
       loading: false,
     }
-
-    if ((summary.activePlayerCount ?? 0) > 0) {
-      setIdentityMessage(
-        `${summary.activePlayerCount} player(s) already in ${roomId}. You can join them.`,
-        'success',
-        'room-summary',
-      )
-    } else {
-      clearRoomSummaryMessage()
-    }
+    clearRoomSummaryMessage()
   } catch {
     if (lookupId !== latestRoomLookupId) return
 
@@ -411,6 +460,7 @@ async function leaveRoomAndReturnHome() {
   }
 
   void loadLeaderboards()
+  void loadActiveRooms()
   setIdentityMessage(`Left ${roomId}.`, 'neutral', 'leave')
   scheduleRoomSummaryRefresh()
 }
@@ -449,16 +499,6 @@ function renderRoomStatus(state = multiplayer.getState()) {
   ) {
     clearRoomSummaryMessage()
   }
-  const countdownSeconds =
-    state.roomStatus === 'countdown' && state.countdownMs
-      ? Math.max(
-          0,
-          Math.ceil(
-            (state.countdownStartedAt + state.countdownMs - Date.now()) / 1000,
-          ),
-        )
-      : null
-
   let statusText = ''
   let tone = 'neutral'
   if (state.connectionStatus === 'connecting') {
@@ -466,17 +506,9 @@ function renderRoomStatus(state = multiplayer.getState()) {
   } else if (state.lastError) {
     statusText = state.lastError
     tone = 'error'
-  } else if (state.roomStatus === 'countdown') {
-    statusText = `Countdown running in ${state.roomId}. Race starts in ${countdownSeconds}s.`
-    tone = 'success'
-  } else if (state.roomStatus === 'racing') {
-    statusText = `Race live in ${state.roomId}. ${state.connectedPlayers.length} player(s) connected.`
-    tone = 'success'
-  } else if (state.roomStatus === 'finished') {
-    statusText = `Race finished in ${state.roomId}. Start a new room for another round.`
-    tone = 'success'
   } else if (state.connectionStatus === 'connected') {
-    statusText = `Connected to ${state.roomId}. Waiting for the room countdown.`
+    statusText = `Connected to ${state.roomId}. ${state.connectedPlayers.length} player(s) in the room.`
+    tone = 'success'
   }
 
   const lapSubmissionStatus = getLapSubmissionStatus(state)
@@ -523,10 +555,6 @@ function renderRoomStatus(state = multiplayer.getState()) {
         player.anonymousPlayerId === selfId
           ? state.localPlayerAllTimeBestLapMs ?? player.allTimeBestLapMs ?? null
           : player.allTimeBestLapMs ?? null
-      if (player.finishPlace != null) {
-        metaParts.push(`P${player.finishPlace}`)
-      }
-
       if (displayRecordLapMs) {
         metaParts.push(`record ${formatLapMs(displayRecordLapMs)}`)
       } else if (player.bestLapMs) {
@@ -563,6 +591,26 @@ async function handleStartRace() {
 }
 
 startButton.addEventListener('click', () => {
+  void handleStartRace()
+})
+
+activeRoomList?.addEventListener('click', (event) => {
+  if (!(event.target instanceof Element)) return
+
+  if (pendingGameLaunch && multiplayer.getState().connectionStatus !== 'disconnected') {
+    return
+  }
+
+  const button = event.target.closest('[data-active-room-id]')
+  if (!(button instanceof HTMLElement)) return
+
+  const roomId = sanitizeRoomId(button.dataset.activeRoomId ?? '')
+  if (!roomId) return
+
+  touchUserActivity()
+  syncInputValues(roomId, roomIdInputs)
+  clearRoomSummaryMessage()
+  void refreshRoomSummary(roomId)
   void handleStartRace()
 })
 
@@ -690,8 +738,18 @@ window.addEventListener('beforeunload', () => {
 })
 
 window.addEventListener('resize', syncMobileHudOffset)
+window.addEventListener('focus', () => {
+  void loadActiveRooms()
+})
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    void loadActiveRooms()
+  }
+})
 
 multiplayer.subscribe((state) => {
+  const connectionStatusChanged = state.connectionStatus !== previousConnectionStatus
+
   if (
     state.connectionStatus === 'connected' &&
     previousConnectionStatus !== 'connected'
@@ -758,8 +816,9 @@ multiplayer.subscribe((state) => {
   previousLapSubmissionResolvedAt = lapSubmissionResolvedAt
   previousLocalPlayerBestLapMs = localPlayerBestLapMs
   renderRoomStatus(state)
-  if (state.roomStatus === 'finished') {
-    void loadLeaderboards()
+
+  if (connectionStatusChanged) {
+    void loadActiveRooms()
   }
 })
 
@@ -782,8 +841,14 @@ hydrateRoomIdFromUrl()
 syncStoredIdentityToUi()
 renderRoomShareControls()
 syncRoomShareButtonLabel()
+renderActiveRooms()
 renderPrimaryButton()
 scheduleRoomSummaryRefresh()
 renderRoomStatus()
 syncMobileHudOffset()
+void loadActiveRooms()
 void loadLeaderboards()
+
+window.setInterval(() => {
+  void loadActiveRooms()
+}, ACTIVE_ROOMS_REFRESH_MS)
