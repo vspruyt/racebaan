@@ -78,6 +78,7 @@ canvas {
   place-items: center;
   padding: 1.5rem;
   overflow: auto;
+  touch-action: pan-y;
 }
 
 .screen-game {
@@ -1047,6 +1048,19 @@ h1 {
   outline-offset: 2px;
 }
 
+.text-input[data-invalid] {
+  border-color: rgba(220, 38, 38, 0.52);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(255, 244, 244, 0.98));
+  box-shadow:
+    0 0 0 1px rgba(220, 38, 38, 0.14),
+    0 0 0.9rem rgba(248, 113, 113, 0.18);
+}
+
+.text-input[data-invalid]:focus-visible {
+  outline-color: rgba(248, 113, 113, 0.45);
+}
+
 .form-message {
   margin: 0;
   min-height: 1.2rem;
@@ -1398,6 +1412,14 @@ code {
   .screen-home,
   .hud {
     padding: 1rem;
+  }
+
+  .screen-home {
+    place-items: start center;
+    align-content: start;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-y;
   }
 
   .hint {

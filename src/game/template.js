@@ -22,7 +22,7 @@ export const APP_TEMPLATE = `
               class="text-input"
               type="text"
               maxlength="20"
-              placeholder="FastFox"
+              placeholder="Enter nickname"
               data-display-name-input
             />
           </label>

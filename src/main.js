@@ -82,6 +82,13 @@ function setIdentityMessage(message, tone = 'neutral', source = 'general') {
   }
 }
 
+function setInputValidationState(inputs, isInvalid) {
+  for (const input of inputs) {
+    input.toggleAttribute('data-invalid', isInvalid)
+    input.setAttribute('aria-invalid', isInvalid ? 'true' : 'false')
+  }
+}
+
 function clearRoomSummaryMessage() {
   if (identityMessageSource !== 'room-summary') return
   setIdentityMessage('', 'neutral', 'neutral')
@@ -401,7 +408,11 @@ function persistIdentityFromUi() {
   const displayName = saveDisplayName(displayNameRaw)
   const roomId = saveRoomId(roomIdRaw)
 
+  setInputValidationState(displayNameInputs, false)
+
   if (!displayName) {
+    setInputValidationState(displayNameInputs, true)
+    displayNameInputs[0]?.focus()
     setIdentityMessage(
       'Use 3-20 characters with letters, numbers, spaces, - or _.',
       'error',
@@ -705,6 +716,7 @@ leaveRoomButton?.addEventListener('click', () => {
 for (const input of displayNameInputs) {
   input.addEventListener('input', () => {
     touchUserActivity()
+    setInputValidationState(displayNameInputs, false)
     syncInputValues(input.value, displayNameInputs)
   })
 }

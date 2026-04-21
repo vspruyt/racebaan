@@ -2307,7 +2307,7 @@ function onCameraPointerMove(event) {
 
   cameraState.orbitYaw -= deltaX * 0.008
   cameraState.orbitPitch = THREE.MathUtils.clamp(
-    cameraState.orbitPitch + deltaY * 0.006,
+    cameraState.orbitPitch - deltaY * 0.006,
     ORBIT_MIN_PHI,
     ORBIT_MAX_PHI,
   )
