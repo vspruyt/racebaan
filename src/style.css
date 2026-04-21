@@ -75,7 +75,8 @@ canvas {
 
 .screen-home {
   display: grid;
-  place-items: center;
+  place-items: start center;
+  align-content: start;
   padding: 1.5rem;
   overflow: auto;
   touch-action: pan-y;
@@ -890,7 +891,7 @@ h1 {
   display: grid;
   gap: 1rem;
   grid-template-columns: minmax(0, 1.05fr) minmax(0, 1.2fr);
-  align-items: stretch;
+  align-items: start;
 }
 
 .setup-card,
@@ -902,7 +903,7 @@ h1 {
 
 .setup-card,
 .leaderboard-card {
-  align-self: stretch;
+  align-self: start;
 }
 
 .leaderboard-card {

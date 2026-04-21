@@ -605,6 +605,13 @@ async function handleStartRace() {
   })
 }
 
+function handleSetupInputKeydown(event) {
+  if (event.key !== 'Enter' || event.isComposing || startButton.disabled) return
+
+  event.preventDefault()
+  void handleStartRace()
+}
+
 startButton.addEventListener('click', () => {
   void handleStartRace()
 })
@@ -719,6 +726,7 @@ for (const input of displayNameInputs) {
     setInputValidationState(displayNameInputs, false)
     syncInputValues(input.value, displayNameInputs)
   })
+  input.addEventListener('keydown', handleSetupInputKeydown)
 }
 
 for (const input of roomIdInputs) {
@@ -728,6 +736,7 @@ for (const input of roomIdInputs) {
     clearRoomSummaryMessage()
     scheduleRoomSummaryRefresh()
   })
+  input.addEventListener('keydown', handleSetupInputKeydown)
 }
 
 for (const eventName of [

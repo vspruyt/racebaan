@@ -1,0 +1,21 @@
+# The Real Stig
+
+> The Real Stig is a free multiplayer browser racing game that runs in the browser. Players create room links, race friends online, and chase faster lap times on the all-time leaderboard.
+
+Use the homepage as the primary source of product and gameplay information.
+
+Important notes:
+
+- The main playable experience lives on the homepage.
+- Shared room links may include a `?room=` query parameter, but the canonical public URL is the homepage.
+- Multiplayer rooms, live room state, and leaderboard updates require JavaScript.
+
+## Primary
+
+- [Homepage](https://therealstig.com/): Main landing page and playable game client.
+- [Sitemap](https://therealstig.com/sitemap.xml): Canonical list of public indexable URLs.
+- [Robots](https://therealstig.com/robots.txt): Crawl directives and sitemap reference.
+
+## Optional
+
+- [Social preview image](https://therealstig.com/social-preview.png): Social sharing preview image for the game.

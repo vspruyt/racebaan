@@ -2,11 +2,12 @@ export const APP_TEMPLATE = `
   <section class="screen screen-home" data-screen="home">
     <div class="panel hero-panel home-panel">
       <div class="home-hero">
-        <p class="eyebrow">Made By Stig & his dad</p>
+        <p class="eyebrow">The Real Stig • Made by Stig & his dad</p>
         <h1>Race with your friends</h1>
         <p class="hint">
-          Drop into a fast arcade racing experience built for players who want
-          clean laps, clutch boosts, and bragging rights against their friends.
+          The Real Stig is a free arcade racing game you can play in your
+          browser. Create a room, invite friends, and push for clean laps,
+          clutch boosts, and leaderboard-worthy times.
         </p>
       </div>
 
