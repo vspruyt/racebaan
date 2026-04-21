@@ -59,6 +59,7 @@ let pendingGameLaunch = false
 let pendingGameLaunchMode = 'start'
 let activeRooms = []
 let activeRoomsLoading = false
+let activeRoomsLoaded = false
 let roomSummary = {
   roomId: null,
   activePlayerCount: 0,
@@ -245,7 +246,7 @@ function renderLeaderboardError(container, message) {
 function renderActiveRooms() {
   if (!activeRoomList) return
 
-  if (activeRoomsLoading && activeRooms.length === 0) {
+  if (!activeRoomsLoaded && activeRoomsLoading && activeRooms.length === 0) {
     activeRoomList.innerHTML =
       '<div class="active-room-empty">Looking for rooms with racers in them...</div>'
     return
@@ -276,7 +277,9 @@ function renderActiveRooms() {
 
 async function loadActiveRooms() {
   activeRoomsLoading = true
-  renderActiveRooms()
+  if (!activeRoomsLoaded) {
+    renderActiveRooms()
+  }
 
   try {
     const rooms = await fetchActiveRooms()
@@ -291,6 +294,7 @@ async function loadActiveRooms() {
     activeRooms = []
   } finally {
     activeRoomsLoading = false
+    activeRoomsLoaded = true
     renderActiveRooms()
   }
 }
